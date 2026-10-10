@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-serving-ollama
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-serving-ollama
+  template:
+    metadata:
+      labels:
+        app: llm-serving-ollama
+    spec:
+      containers:
+        - name: ollama
+          image: "{{ .Values.ollamaImage.repository }}:{{ .Values.ollamaImage.tag }}"
+          imagePullPolicy: {{ .Values.ollamaImage.pullPolicy }}
+          ports:
+            - containerPort: 11434
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi

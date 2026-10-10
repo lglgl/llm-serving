@@ -1,0 +1,19 @@
+namespace: llm-serving
+
+image:
+  repository: llm-serving
+  tag: "0.2.1"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ollama:
+  baseUrl: "http://llm-serving-ollama:11434"
+  model: "qwen2:0.5b"
+
+ollamaImage:
+  repository: llm-serving-ollama
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent

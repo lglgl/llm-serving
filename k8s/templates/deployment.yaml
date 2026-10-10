@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-serving
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: llm-serving
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: llm-serving
+  template:
+    metadata:
+      labels:
+        app: llm-serving
+    spec:
+      serviceAccountName: llm-serving
+      containers:
+        - name: llm-serving
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          # 从 ConfigMap 注入 Ollama 地址和默认模型
+          envFrom:
+            - configMapRef:
+                name: llm-serving-config
+
+          # 资源配置
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          # 就绪探针：决定 Pod 是否可以接收流量
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # 存活探针：决定容器是否需要重启
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3

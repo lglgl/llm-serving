@@ -1,0 +1,7 @@
+apiVersion: v2
+name: llm-serving
+description: LLM Serving Platform
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+icon: https://helm.sh/img/helm.svg

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-serving-config
+  namespace: {{ .Values.namespace }}
+data:
+  OLLAMA_BASE_URL: {{ .Values.ollama.baseUrl | quote }}
+  DEFAULT_MODEL: {{ .Values.ollama.model | quote }}

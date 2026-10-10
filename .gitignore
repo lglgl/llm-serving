@@ -1,0 +1,29 @@
+cat > .gitignore <<'EOF'
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Local model files
+ollama/models/
+models/
+
+# Local data
+data/
+EOF
