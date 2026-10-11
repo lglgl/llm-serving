@@ -1,4 +1,3 @@
-cat > .gitignore <<'EOF'
 # Python
 .venv/
 venv/
@@ -22,8 +21,9 @@ __pycache__/
 
 # Local model files
 ollama/models/
+llama/models/
 models/
 
 # Local data
 data/
-EOF
+*.tar
