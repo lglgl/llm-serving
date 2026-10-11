@@ -95,7 +95,7 @@ pipeline {
                     portal_status=$(curl --silent --show-error \
                         --connect-timeout 5 \
                         --max-time 10 \
-                        --resolve "$HARBOR:80:$HARBOR_IP" \
+                        --resolve "harbor.local:30080:$HARBOR_IP"
                         -o /dev/null \
                         -w '%{http_code}' \
                         "$HARBOR_URL/")
@@ -114,7 +114,7 @@ pipeline {
                     registry_status=$(curl --silent --show-error \
                         --connect-timeout 5 \
                         --max-time 10 \
-                        --resolve "$HARBOR:80:$HARBOR_IP" \
+                        --resolve "harbor.local:30080:$HARBOR_IP"
                         -o /dev/null \
                         -w '%{http_code}' \
                         "$HARBOR_URL/v2/")
