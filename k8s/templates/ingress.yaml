@@ -2,14 +2,15 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: llm-serving
-  namespace: {{ .Values.namespace }}
+  namespace: llm-serving
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   rules:
-    - host: llm-serving.local
-      http:
+    - http:
         paths:
-          - path: /
+          - path: /llm-serving
             pathType: Prefix
             backend:
               service:

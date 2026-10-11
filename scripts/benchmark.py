@@ -4,7 +4,7 @@ import requests
 
 
 BASE_URL = "http://localhost:8000"
-MODEL = "qwen3:8b"
+MODEL = "qwen2:0.5b"
 
 
 def benchmark(prompt: str):

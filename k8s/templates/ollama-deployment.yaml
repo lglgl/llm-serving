@@ -3,38 +3,64 @@ kind: Deployment
 metadata:
   name: llm-serving-ollama
   namespace: {{ .Values.namespace }}
+  labels:
+    app: llm-serving-ollama
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: llm-serving-ollama
+
   template:
     metadata:
       labels:
         app: llm-serving-ollama
     spec:
+      # Ollama 使用独立身份，不继承 FastAPI 的身份
+      serviceAccountName: llm-serving-ollama
+      automountServiceAccountToken: false
+
+      terminationGracePeriodSeconds: 60
+
       containers:
         - name: ollama
           image: "{{ .Values.ollamaImage.repository }}:{{ .Values.ollamaImage.tag }}"
           imagePullPolicy: {{ .Values.ollamaImage.pullPolicy }}
+
           ports:
-            - containerPort: 11434
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+
+          # CPU 和内存资源配置由 values.yaml 统一管理
+          resources:
+            {{- toYaml .Values.resources.ollama | nindent 12 }}
+
+          # 启动探针：等待 Ollama HTTP API 可用
+          # 模型已打包进镜像，但首次加载模型仍可能需要时间
+          startupProbe:
+            httpGet:
+              path: /api/tags
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+
+          # 就绪探针：只有 Ollama API 可用时才接收服务流量
           readinessProbe:
             httpGet:
               path: /api/tags
-              port: 11434
-            initialDelaySeconds: 5
+              port: http
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # 存活探针：检测 Ollama HTTP 服务是否仍可响应
           livenessProbe:
             httpGet:
               path: /api/tags
-              port: 11434
-            initialDelaySeconds: 15
+              port: http
             periodSeconds: 20
-          resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
+            timeoutSeconds: 3
+            failureThreshold: 3

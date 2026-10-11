@@ -7,20 +7,30 @@ metadata:
     app: llm-serving
 spec:
   replicas: 1
+
+  # 滚动更新：尽量保持更新期间服务可用
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
+
   selector:
     matchLabels:
       app: llm-serving
+
   template:
     metadata:
       labels:
         app: llm-serving
     spec:
+      # 使用专用 ServiceAccount；该账号不需要访问 Kubernetes API
       serviceAccountName: llm-serving
+      automountServiceAccountToken: false
+
+      # 容器正常退出时预留的终止时间
+      terminationGracePeriodSeconds: 30
+
       containers:
         - name: llm-serving
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -36,26 +46,35 @@ spec:
             - configMapRef:
                 name: llm-serving-config
 
-          # 资源配置
+          # CPU 和内存资源配置由 values.yaml 统一管理
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml .Values.resources.fastapi | nindent 12 }}
 
-          # 就绪探针：决定 Pod 是否可以接收流量
+          # 启动探针：确认 FastAPI 端口已经开始监听
+          # 在启动探针成功前，Readiness 和 Liveness 不会执行
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+
+          # 就绪探针：调用 /health。
+          # /health 在 Ollama 不可用时返回 503，从而使 Pod 被移出 Service 后端，
+          # 实现 fail-closed（不再把流量转发到无法推理的实例）。
           readinessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
 
-          # 存活探针：决定容器是否需要重启
+          # 存活探针：仅检查 FastAPI 端口是否仍可接受 TCP 连接
+          # 避免 Ollama 短暂不可用时，仅因依赖异常就反复重启 FastAPI
           livenessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: http
-            initialDelaySeconds: 15
             periodSeconds: 20
-            timeoutSeconds: 5
+            timeoutSeconds: 2
             failureThreshold: 3

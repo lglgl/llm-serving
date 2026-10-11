@@ -11,8 +11,8 @@ Client -> FastAPI -> Ollama API -> Qwen -> Apple Silicon
 ## Start Ollama
 
 ```bash
-ollama pull qwen3:8b
-ollama run qwen3:8b
+ollama pull qwen2:0.5b
+ollama run qwen2:0.5b
 ```
 
 ## Start API
@@ -34,7 +34,7 @@ curl http://localhost:8000/v1/models
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3:8b","messages":[{"role":"user","content":"Explain Kubernetes Deployment."}]}'
+  -d '{"model":"qwen2:0.5b","messages":[{"role":"user","content":"Explain Kubernetes Deployment."}]}'
 ```
 
 ## Streaming
@@ -42,7 +42,7 @@ curl http://localhost:8000/v1/chat/completions \
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3:8b","messages":[{"role":"user","content":"Explain Kubernetes Scheduler."}],"stream":true}'
+  -d '{"model":"qwen2:0.5b","messages":[{"role":"user","content":"Explain Kubernetes Scheduler."}],"stream":true}'
 ```
 
 ## Tests

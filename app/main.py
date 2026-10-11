@@ -14,8 +14,17 @@ ollama = OllamaClient()
 
 @app.get("/health")
 async def health() -> dict:
+    # 就绪探针（readinessProbe）会调用此端点。
+    # 设计目标：Ollama 不可用时让本 Pod 从 Service 后端摘除（fail-closed），
+    # 避免把请求转发到无法完成推理的实例。
+    # - Ollama 可用：返回 200，Pod 正常承接流量；
+    # - Ollama 不可用：返回 503，Kubernetes 将 Pod 移出 Service 端点。
+    # 注意：存活探针（livenessProbe）用的是 TCP 端口检测（见 deployment.yaml），
+    # 因此 Ollama 短暂抖动只会触发就绪摘除，不会误重启 FastAPI 进程。
     ollama_ok = await ollama.health()
-    return {"status": "ok" if ollama_ok else "degraded", "service": "llm-serving", "ollama": "ok" if ollama_ok else "unavailable"}
+    if not ollama_ok:
+        raise HTTPException(status_code=503, detail="Ollama unavailable")
+    return {"status": "ok", "service": "llm-serving", "ollama": "ok"}
 
 
 @app.get("/v1/models", response_model=ModelListResponse)
