@@ -1,26 +1,30 @@
+
 pipeline {
     agent any
 
     options {
-        // 禁止同一个任务并发执行，避免同时构建和覆盖镜像标签
+        // 禁止并发构建，避免同时覆盖镜像标签
         disableConcurrentBuilds()
 
-        // 整个 Pipeline 最长运行 30 分钟，防止任务无限等待
-        timeout(time: 30, unit: 'MINUTES')
+        // 两个镜像构建、模型下载和推送可能耗时较长
+        timeout(time: 60, unit: 'MINUTES')
     }
 
     environment {
-        // Harbor 镜像仓库地址，当前使用 HTTP
+        // Harbor 镜像仓库地址
         HARBOR = 'harbor.local:30080'
 
         // Harbor 项目名称
         HARBOR_PROJECT = 'library'
 
-        // FastAPI 服务镜像名称
+        // FastAPI 服务镜像
         APP_IMAGE = 'llm-serving'
 
-        // llama.cpp + Qwen 模型服务镜像名称
+        // llama.cpp + Qwen 服务镜像
         LLAMA_IMAGE = 'llm-serving-llama'
+
+        // 本机 Docker Desktop 的 Ingress 入口
+        HARBOR_IP = '127.0.0.1'
     }
 
     stages {
@@ -28,13 +32,14 @@ pipeline {
             steps {
                 echo '========== 阶段 1：检出 GitHub 代码 =========='
 
-                // 从 Jenkins SCM 配置的 GitHub 仓库检出代码
                 checkout scm
 
                 sh '''
                     set -eu
+
                     echo "当前工作目录：$(pwd)"
                     echo "当前 Git 提交：$(git rev-parse --short HEAD)"
+                    echo "当前分支：$(git branch --show-current)"
                 '''
             }
         }
@@ -46,8 +51,7 @@ pipeline {
                 sh '''
                     set -eu
 
-                    # macOS Homebrew 的常见路径。
-                    # Jenkins 服务可能没有继承终端中的 PATH。
+                    # 补充 macOS Homebrew 常见路径
                     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
                     echo "操作系统：$(uname -s)"
@@ -55,17 +59,15 @@ pipeline {
                     echo "当前用户：$(whoami)"
                     echo "PATH=$PATH"
 
-                    # 检查 Docker CLI 是否存在
+                    # 检查 Docker CLI
                     if ! command -v docker >/dev/null 2>&1; then
-                        echo "ERROR: 找不到 Docker CLI"
-                        echo "请检查 Docker Desktop 是否安装，以及 Jenkins 节点 PATH 配置"
+                        echo "ERROR：找不到 Docker CLI"
                         exit 1
                     fi
 
-                    echo "Docker CLI 路径：$(command -v docker)"
+                    echo "Docker CLI：$(command -v docker)"
 
-                    # 同时检查 Docker Client 和 Server。
-                    # 只有两者都正常，才能开始构建镜像。
+                    # 检查 Docker Client 和 Server 是否都可用
                     docker version
 
                     echo "Docker 环境检查通过"
@@ -80,29 +82,55 @@ pipeline {
                 sh '''
                     set -eu
 
-                    # 检查 Harbor HTTP 入口是否可访问
-                    echo "检查地址：http://$HARBOR"
+                    # 使用 --resolve 绕过系统 DNS 查询。
+                    # 请求仍然携带 harbor.local 作为 Host，
+                    # 因此 NGINX Ingress 可以匹配 Harbor 路由。
+                    HARBOR_URL="http://$HARBOR"
 
-                    curl -sS \
-                      --connect-timeout 5 \
-                      --max-time 10 \
-                      -o /dev/null \
-                      -w 'Harbor HTTP 状态码：%{http_code}\\n' \
-                      "http://$HARBOR/"
+                    echo "Harbor 地址：$HARBOR_URL"
+                    echo "连接 IP：$HARBOR_IP"
 
-                    # 检查 Docker Registry API。
-                    # 未认证时返回 401 通常是正常的，说明 Registry 可访问。
-                    curl -sS \
-                      --connect-timeout 5 \
-                      --max-time 10 \
-                      -o /dev/null \
-                      -w 'Registry API 状态码：%{http_code}\\n' \
-                      "http://$HARBOR/v2/" || {
-                        echo "ERROR: Registry API 访问失败"
+                    echo "检查 Harbor Portal..."
+
+                    portal_status=$(curl --silent --show-error \
+                        --connect-timeout 5 \
+                        --max-time 10 \
+                        --resolve "$HARBOR:80:$HARBOR_IP" \
+                        -o /dev/null \
+                        -w '%{http_code}' \
+                        "$HARBOR_URL/")
+
+                    if [ "$portal_status" != "200" ]; then
+                        echo "ERROR：Harbor Portal 检查失败"
+                        echo "HTTP 状态码：$portal_status"
+                        echo "请检查 Ingress Host 和 Harbor Portal 后端"
                         exit 1
-                      }
+                    fi
 
-                    echo "Harbor 连通性检查完成"
+                    echo "Harbor Portal 检查通过"
+
+                    echo "检查 Harbor Registry API..."
+
+                    registry_status=$(curl --silent --show-error \
+                        --connect-timeout 5 \
+                        --max-time 10 \
+                        --resolve "$HARBOR:80:$HARBOR_IP" \
+                        -o /dev/null \
+                        -w '%{http_code}' \
+                        "$HARBOR_URL/v2/")
+
+                    # 未登录时返回 401 通常属于正常认证行为
+                    case "$registry_status" in
+                        200|401)
+                            echo "Registry API 检查通过"
+                            echo "HTTP 状态码：$registry_status"
+                            ;;
+                        *)
+                            echo "ERROR：Registry API 检查失败"
+                            echo "HTTP 状态码：$registry_status"
+                            exit 1
+                            ;;
+                    esac
                 '''
             }
         }
@@ -114,18 +142,19 @@ pipeline {
                 sh '''
                     set -eu
 
-                    # 检查两个镜像的构建文件是否存在
+                    # 检查两个镜像所需的构建文件
                     test -f Dockerfile
                     test -f requirements.txt
                     test -f llama/Dockerfile
 
-                    echo "项目文件检查通过"
+                    echo "构建文件检查通过"
 
                     # 防止大型 GGUF 模型文件被提交到 Git
-                    if git ls-files --error-unmatch \
-                      llama/models/qwen2-0_5b-instruct-q4_k_m.gguf \
-                      >/dev/null 2>&1; then
-                        echo "ERROR: GGUF 模型文件不能提交到 Git"
+                    MODEL_FILE="llama/models/qwen2-0_5b-instruct-q4_k_m.gguf"
+
+                    if git ls-files --error-unmatch "$MODEL_FILE" \
+                        >/dev/null 2>&1; then
+                        echo "ERROR：模型文件不能提交到 Git"
                         exit 1
                     fi
 
@@ -136,7 +165,6 @@ pipeline {
 
         stage('Build llm-serving') {
             options {
-                // 单个镜像构建最多等待 10 分钟
                 timeout(time: 10, unit: 'MINUTES')
             }
 
@@ -147,18 +175,16 @@ pipeline {
                     set -eu
                     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-                    # 使用 Jenkins 构建编号生成不可混淆的版本标签
                     IMAGE="$HARBOR/$HARBOR_PROJECT/$APP_IMAGE"
 
                     echo "目标镜像：$IMAGE:$BUILD_NUMBER"
                     echo "开始时间：$(date)"
 
-                    # --progress=plain 输出 Docker 每一步的详细日志
-                    # --pull 尝试检查并拉取更新的基础镜像
+                    # 构建 FastAPI 镜像
                     docker build --progress=plain --pull \
-                      -t "$IMAGE:$BUILD_NUMBER" \
-                      -t "$IMAGE:latest" \
-                      -f Dockerfile .
+                        -t "$IMAGE:$BUILD_NUMBER" \
+                        -t "$IMAGE:latest" \
+                        -f Dockerfile .
 
                     echo "llm-serving 镜像构建成功"
                     echo "结束时间：$(date)"
@@ -168,7 +194,7 @@ pipeline {
 
         stage('Build llama + Qwen') {
             options {
-                // 模型下载可能较慢，单独给出 20 分钟
+                // 模型下载可能耗时较长
                 timeout(time: 20, unit: 'MINUTES')
             }
 
@@ -184,12 +210,11 @@ pipeline {
                     echo "目标镜像：$IMAGE:$BUILD_NUMBER"
                     echo "开始时间：$(date)"
 
-                    # 使用 llama/Dockerfile 构建模型服务。
-                    # 构建日志会显示基础镜像拉取、模型下载等步骤。
+                    # Dockerfile 应在构建过程中下载未提交到 Git 的 GGUF 模型
                     docker build --progress=plain --pull \
-                      -t "$IMAGE:$BUILD_NUMBER" \
-                      -t "$IMAGE:latest" \
-                      -f llama/Dockerfile llama
+                        -t "$IMAGE:$BUILD_NUMBER" \
+                        -t "$IMAGE:latest" \
+                        -f llama/Dockerfile llama
 
                     echo "llama + Qwen 镜像构建成功"
                     echo "结束时间：$(date)"
@@ -205,12 +230,14 @@ pipeline {
                     set -eu
                     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-                    # 检查两个版本标签的镜像是否已成功生成
+                    # 确认两个镜像的版本标签均已生成
                     docker image inspect \
-                      "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
+                        "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER" \
+                        >/dev/null
 
                     docker image inspect \
-                      "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:$BUILD_NUMBER"
+                        "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:$BUILD_NUMBER" \
+                        >/dev/null
 
                     echo "两个镜像均已成功生成"
                 '''
@@ -219,7 +246,6 @@ pipeline {
 
         stage('Push to Harbor') {
             options {
-                // 推送阶段最多等待 10 分钟
                 timeout(time: 10, unit: 'MINUTES')
             }
 
@@ -238,34 +264,34 @@ pipeline {
                         set +x
                         export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-                        # 通过 Jenkins Credentials 获取凭据，不在日志中打印密码
+                        # 无论推送成功或失败，均尝试注销 Harbor
+                        trap 'docker logout "$HARBOR" >/dev/null 2>&1 || true' EXIT
+
                         echo "登录 Harbor：$HARBOR"
 
+                        # 从 Jenkins Credentials 读取密码，不打印密码
                         printf '%s' "$HARBOR_PASSWORD" |
-                          docker login "$HARBOR" \
-                            -u "$HARBOR_USER" \
-                            --password-stdin
+                            docker login "$HARBOR" \
+                                -u "$HARBOR_USER" \
+                                --password-stdin
 
-                        # 推送 FastAPI 镜像的版本标签和 latest 标签
-                        echo "推送 llm-serving:$BUILD_NUMBER"
+                        # 推送 FastAPI 镜像
+                        echo "推送 $APP_IMAGE:$BUILD_NUMBER"
                         docker push \
-                          "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
+                            "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
 
-                        echo "推送 llm-serving:latest"
+                        echo "推送 $APP_IMAGE:latest"
                         docker push \
-                          "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:latest"
+                            "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:latest"
 
-                        # 推送 llama + Qwen 镜像的版本标签和 latest 标签
-                        echo "推送 llm-serving-llama:$BUILD_NUMBER"
+                        # 推送 llama.cpp + Qwen 镜像
+                        echo "推送 $LLAMA_IMAGE:$BUILD_NUMBER"
                         docker push \
-                          "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:$BUILD_NUMBER"
+                            "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:$BUILD_NUMBER"
 
-                        echo "推送 llm-serving-llama:latest"
+                        echo "推送 $LLAMA_IMAGE:latest"
                         docker push \
-                          "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:latest"
-
-                        # 注销当前 Docker CLI 的 Harbor 登录
-                        docker logout "$HARBOR"
+                            "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:latest"
 
                         echo "所有镜像已推送到 Harbor"
                     '''
@@ -289,8 +315,8 @@ pipeline {
             echo '''
             ========================================
             CI 失败
-            请根据最后一个成功阶段定位问题。
-            优先检查 Docker、网络、模型下载和 Harbor 认证。
+            请查看最后一个失败阶段的日志。
+            优先检查网络、模型下载和 Harbor 认证。
             ========================================
             '''
         }
