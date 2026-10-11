@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     options {
-        timestamps()
         disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
     }
 
     environment {
@@ -24,6 +24,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     test -f Dockerfile
                     test -f requirements.txt
                     test -f llama/Dockerfile
@@ -60,6 +61,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     docker image inspect \
                       "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
 
@@ -84,7 +86,8 @@ pipeline {
 
                         printf '%s' "$HARBOR_PASSWORD" |
                           docker login "$HARBOR" \
-                            -u "$HARBOR_USER" --password-stdin
+                            -u "$HARBOR_USER" \
+                            --password-stdin
 
                         docker push \
                           "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
