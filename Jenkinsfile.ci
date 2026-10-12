@@ -1,0 +1,189 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 90, unit: 'MINUTES')
+        timestamps()
+    }
+
+    environment {
+        HARBOR = 'harbor.local:30080'
+        HARBOR_PROJECT = 'library'
+        APP_IMAGE = 'llm-serving'
+        LLAMA_IMAGE = 'llm-serving-llama'
+        HARBOR_IP = '127.0.0.1'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    set -eu
+                    echo "Workspace: $(pwd)"
+                    echo "Commit: $(git rev-parse --short HEAD)"
+                    echo "Branch: $(git branch --show-current)"
+                '''
+            }
+        }
+
+        stage('Check Environment and Harbor') {
+            steps {
+                sh '''
+                    set -eu
+                    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+                    command -v docker
+                    docker version
+                    command -v python3
+                    python3 --version
+
+                    HARBOR_URL="http://$HARBOR"
+                    portal_status=$(curl --silent --show-error \
+                        --connect-timeout 5 --max-time 10 \
+                        --resolve "harbor.local:30080:$HARBOR_IP" \
+                        -o /dev/null -w '%{http_code}' "$HARBOR_URL/")
+                    test "$portal_status" = "200" || {
+                        echo "Harbor Portal check failed: HTTP $portal_status"
+                        exit 1
+                    }
+
+                    registry_status=$(curl --silent --show-error \
+                        --connect-timeout 5 --max-time 10 \
+                        --resolve "harbor.local:30080:$HARBOR_IP" \
+                        -o /dev/null -w '%{http_code}' "$HARBOR_URL/v2/")
+                    case "$registry_status" in
+                        200|401) echo "Harbor Registry API OK: HTTP $registry_status" ;;
+                        *) echo "Harbor Registry API failed: HTTP $registry_status"; exit 1 ;;
+                    esac
+                '''
+            }
+        }
+
+        stage('Validate Files') {
+            steps {
+                sh '''
+                    set -eu
+                    test -f Dockerfile
+                    test -f requirements.txt
+                    test -f app/main.py
+                    test -f tests/test_api.py
+                    test -f llama/Dockerfile
+                    test -f k8s/Chart.yaml
+                    test -f k8s/values.yaml
+
+                    MODEL_FILE="llama/models/qwen2-0_5b-instruct-q4_k_m.gguf"
+                    if git ls-files --error-unmatch "$MODEL_FILE" >/dev/null 2>&1; then
+                        echo "ERROR: GGUF model must not be committed to Git"
+                        exit 1
+                    fi
+                    echo "Required files found; GGUF model is not tracked by Git."
+                '''
+            }
+        }
+
+        stage('Python Tests') {
+            options { timeout(time: 15, unit: 'MINUTES') }
+            steps {
+                sh '''
+                    set -eu
+                    python3 -m venv .venv-ci
+                    .venv-ci/bin/python -m pip install --upgrade pip
+                    .venv-ci/bin/python -m pip install -r requirements.txt pytest
+                    PYTHONPATH="$WORKSPACE" .venv-ci/bin/python -m compileall -q app
+                    PYTHONPATH="$WORKSPACE" .venv-ci/bin/python -m pytest -q
+                '''
+            }
+        }
+
+        stage('Helm Validation') {
+            steps {
+                sh '''
+                    set -eu
+                    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+                    helm lint ./k8s
+                    helm template llm-serving ./k8s -n llm-serving -f k8s/values.yaml >/tmp/llm-serving-rendered.yaml
+                    if grep -Eiq 'OLLAMA_BASE_URL|llm-serving-ollama|ollamaImage' /tmp/llm-serving-rendered.yaml; then
+                        echo "ERROR: rendered Helm manifest contains legacy Ollama configuration"
+                        grep -Ein 'OLLAMA_BASE_URL|llm-serving-ollama|ollamaImage' /tmp/llm-serving-rendered.yaml || true
+                        exit 1
+                    fi
+                '''
+            }
+        }
+
+        stage('Build Images') {
+            parallel {
+                stage('Build FastAPI') {
+                    options { timeout(time: 20, unit: 'MINUTES') }
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+                            IMAGE="$HARBOR/$HARBOR_PROJECT/$APP_IMAGE"
+                            docker build --pull --progress=plain \
+                                -t "$IMAGE:$BUILD_NUMBER" \
+                                -t "$IMAGE:latest" \
+                                -f Dockerfile .
+                            docker image inspect "$IMAGE:$BUILD_NUMBER" >/dev/null
+                        '''
+                    }
+                }
+                stage('Build llama.cpp + Qwen') {
+                    options { timeout(time: 45, unit: 'MINUTES') }
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+                            IMAGE="$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE"
+                            docker build --pull --progress=plain \
+                                -t "$IMAGE:$BUILD_NUMBER" \
+                                -t "$IMAGE:latest" \
+                                -f llama/Dockerfile llama
+                            docker image inspect "$IMAGE:$BUILD_NUMBER" >/dev/null
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Push to Harbor') {
+            options { timeout(time: 20, unit: 'MINUTES') }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'harbor-credentials',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+                        trap 'docker logout "$HARBOR" >/dev/null 2>&1 || true' EXIT
+                        printf '%s' "$HARBOR_PASSWORD" |
+                            docker login "$HARBOR" -u "$HARBOR_USER" --password-stdin
+
+                        docker push "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
+                        docker push "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:latest"
+                        docker push "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:$BUILD_NUMBER"
+                        docker push "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:latest"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "CI succeeded. IMAGE_TAG=${env.BUILD_NUMBER}; latest tags also pushed to Harbor."
+        }
+        failure {
+            echo 'CI failed. CD should not be run until this build is green.'
+        }
+        always {
+            echo "CI result: ${currentBuild.currentResult}; build: ${env.BUILD_NUMBER}"
+        }
+    }
+}

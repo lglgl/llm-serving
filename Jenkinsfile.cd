@@ -1,0 +1,312 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+    }
+
+    parameters {
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Harbor image tag to deploy. For a reproducible release, use the CI build number.'
+        )
+        booleanParam(
+            name: 'FAIL_ON_CRITICAL',
+            defaultValue: true,
+            description: 'Fail the security scan branch when either image has one or more Critical vulnerabilities.'
+        )
+    }
+
+    environment {
+        HARBOR = 'harbor.local:30080'
+        HARBOR_PROJECT = 'library'
+        APP_IMAGE = 'llm-serving'
+        LLAMA_IMAGE = 'llm-serving-llama'
+        HARBOR_IP = '127.0.0.1'
+
+        K8S_CONTEXT = 'docker-desktop'
+        K8S_NAMESPACE = 'llm-serving'
+        HARBOR_NAMESPACE = 'harbor'
+        TRIVY_URL = 'http://harbor-trivy:8080'
+
+        APP_DEPLOYMENT = 'llm-serving'
+        APP_CONTAINER = 'llm-serving'
+        LLAMA_DEPLOYMENT = 'llm-serving-llama'
+        LLAMA_CONTAINER = 'llm-serving-llama'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    set -eu
+                    echo "Commit: $(git rev-parse --short HEAD)"
+                    echo "Deploying image tag: $IMAGE_TAG"
+                    test -n "$IMAGE_TAG"
+                    case "$IMAGE_TAG" in
+                        *[!a-zA-Z0-9_.-]*)
+                            echo "Invalid IMAGE_TAG: $IMAGE_TAG"
+                            exit 1
+                            ;;
+                    esac
+                '''
+            }
+        }
+
+        stage('Check Cluster and Harbor') {
+            steps {
+                sh '''
+                    set -eu
+                    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+                    kubectl config use-context "$K8S_CONTEXT"
+                    kubectl get nodes
+
+                    HARBOR_URL="http://$HARBOR"
+                    portal_status=$(curl --silent --show-error \
+                        --connect-timeout 5 --max-time 10 \
+                        --resolve "harbor.local:30080:$HARBOR_IP" \
+                        -o /dev/null -w '%{http_code}' "$HARBOR_URL/")
+                    test "$portal_status" = "200" || {
+                        echo "Harbor Portal check failed: HTTP $portal_status"
+                        exit 1
+                    }
+                '''
+            }
+        }
+
+        stage('Deploy') {
+            options { timeout(time: 15, unit: 'MINUTES') }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'harbor-credentials',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+                        kubectl config use-context "$K8S_CONTEXT"
+                        kubectl create namespace "$K8S_NAMESPACE" \
+                            --dry-run=client -o yaml | kubectl apply -f -
+
+                        kubectl -n "$K8S_NAMESPACE" create secret docker-registry harbor-pull-secret \
+                            --docker-server="$HARBOR" \
+                            --docker-username="$HARBOR_USER" \
+                            --docker-password="$HARBOR_PASSWORD" \
+                            --dry-run=client -o yaml | kubectl apply -f -
+
+                        helm upgrade --install llm-serving ./k8s \
+                            --namespace "$K8S_NAMESPACE" \
+                            --create-namespace \
+                            --values k8s/values.yaml \
+                            --set-string image.tag="$IMAGE_TAG" \
+                            --set-string llamaImage.tag="$IMAGE_TAG"
+
+                        kubectl -n "$K8S_NAMESPACE" patch deployment "$APP_DEPLOYMENT" \
+                            --type=merge \
+                            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"harbor-pull-secret"}]}}}}'
+
+                        kubectl -n "$K8S_NAMESPACE" patch deployment "$LLAMA_DEPLOYMENT" \
+                            --type=merge \
+                            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"harbor-pull-secret"}]}}}}'
+
+                        kubectl -n "$K8S_NAMESPACE" rollout status \
+                            "deployment/$APP_DEPLOYMENT" --timeout=240s
+                        kubectl -n "$K8S_NAMESPACE" rollout status \
+                            "deployment/$LLAMA_DEPLOYMENT" --timeout=360s
+
+                        # Remove legacy resources if they were created outside the current Helm release.
+                        kubectl -n "$K8S_NAMESPACE" delete deployment llm-serving-ollama --ignore-not-found
+                        kubectl -n "$K8S_NAMESPACE" delete service llm-serving-ollama --ignore-not-found
+
+                        kubectl -n "$K8S_NAMESPACE" get deployments,pods,services
+                    '''
+                }
+            }
+        }
+
+        stage('Security Scan and Smoke Tests') {
+            parallel {
+                stage('Harbor Trivy Security Scan') {
+                    options { timeout(time: 25, unit: 'MINUTES') }
+                    steps {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'harbor-credentials',
+                                usernameVariable: 'HARBOR_USER',
+                                passwordVariable: 'HARBOR_PASSWORD'
+                            )
+                        ]) {
+                            sh '''
+                                set -eu
+                                set +x
+                                export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+                                # Scanner adapter is cluster-internal; check its metadata endpoint from inside Kubernetes.
+                                kubectl -n "$HARBOR_NAMESPACE" delete pod trivy-endpoint-check --ignore-not-found --wait=true
+                                kubectl -n "$HARBOR_NAMESPACE" run trivy-endpoint-check \
+                                    --image=curlimages/curl:8.12.1 \
+                                    --restart=Never --rm -i --attach \
+                                    --command -- sh -ec \
+                                    'curl -fsS --max-time 15 http://harbor-trivy:8080/api/v1/metadata'
+
+                                API="http://$HARBOR/api/v2.0"
+                                scan_image() {
+                                    repo="$1"
+                                    tag="$2"
+                                    artifact_url="$API/projects/$HARBOR_PROJECT/repositories/$repo/artifacts/$tag"
+
+                                    echo "Trigger scan: $repo:$tag"
+                                    code=$(curl -sS -u "$HARBOR_USER:$HARBOR_PASSWORD" \
+                                        -o /tmp/scan-trigger.json -w '%{http_code}' \
+                                        -X POST "$artifact_url/scan")
+                                    case "$code" in
+                                        200|202) ;;
+                                        *) echo "Scan trigger failed for $repo:$tag (HTTP $code)"; cat /tmp/scan-trigger.json; return 1 ;;
+                                    esac
+
+                                    attempt=0
+                                    while [ "$attempt" -lt 60 ]; do
+                                        attempt=$((attempt + 1))
+                                        curl -fsS -u "$HARBOR_USER:$HARBOR_PASSWORD" \
+                                            "$artifact_url?with_scan_overview=true" \
+                                            -o /tmp/scan-overview.json
+
+                                        result=$(python3 -c '
+import json, sys
+d=json.load(open(sys.argv[1]))
+overview=d.get("scan_overview") or {}
+items=list(overview.values()) if isinstance(overview, dict) else []
+if not items:
+    print("WAIT|no-report|0|0|0")
+    raise SystemExit
+s=items[0]
+status=str(s.get("scan_status") or s.get("status") or "unknown")
+summary=s.get("summary") or {}
+critical=int(summary.get("critical", 0) or 0)
+high=int(summary.get("high", 0) or 0)
+total=int(summary.get("total", critical + high) or 0)
+print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
+' /tmp/scan-overview.json)
+
+                                        status=$(printf '%s' "$result" | cut -d '|' -f 1)
+                                        severity=$(printf '%s' "$result" | cut -d '|' -f 2)
+                                        critical=$(printf '%s' "$result" | cut -d '|' -f 3)
+                                        high=$(printf '%s' "$result" | cut -d '|' -f 4)
+                                        total=$(printf '%s' "$result" | cut -d '|' -f 5)
+
+                                        case "$status" in
+                                            Success|success)
+                                                echo "$repo:$tag scan complete; severity=$severity critical=$critical high=$high total=$total"
+                                                if [ "$FAIL_ON_CRITICAL" = "true" ] && [ "$critical" -gt 0 ]; then
+                                                    echo "FAIL: Critical vulnerabilities found in $repo:$tag"
+                                                    return 1
+                                                fi
+                                                return 0
+                                                ;;
+                                            Error|Failed|failure|failed)
+                                                echo "FAIL: Harbor reports scan status $status for $repo:$tag"
+                                                cat /tmp/scan-overview.json
+                                                return 1
+                                                ;;
+                                            *)
+                                                echo "Waiting for $repo:$tag scan ($attempt/60): $result"
+                                                sleep 10
+                                                ;;
+                                        esac
+                                    done
+
+                                    echo "FAIL: timed out waiting for scan result: $repo:$tag"
+                                    cat /tmp/scan-overview.json
+                                    return 1
+                                }
+
+                                scan_image "$APP_IMAGE" "$IMAGE_TAG"
+                                scan_image "$LLAMA_IMAGE" "$IMAGE_TAG"
+                                echo "Both image scans completed."
+                            '''
+                        }
+                    }
+                }
+
+                stage('Smoke Tests') {
+                    options { timeout(time: 15, unit: 'MINUTES') }
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+                            kubectl -n "$K8S_NAMESPACE" rollout status \
+                                "deployment/$APP_DEPLOYMENT" --timeout=240s
+                            kubectl -n "$K8S_NAMESPACE" rollout status \
+                                "deployment/$LLAMA_DEPLOYMENT" --timeout=360s
+
+                            TEST_POD="llm-smoke-test"
+                            kubectl -n "$K8S_NAMESPACE" delete pod "$TEST_POD" \
+                                --ignore-not-found=true --wait=true
+
+                            kubectl -n "$K8S_NAMESPACE" run "$TEST_POD" \
+                                --image=curlimages/curl:8.12.1 \
+                                --restart=Never --rm -i --attach \
+                                --command -- sh -ec '
+                                    set -eu
+                                    FASTAPI="http://llm-serving:8000"
+                                    QWEN="http://llm-serving-llama:8080"
+
+                                    echo "[1] FastAPI OpenAPI"
+                                    curl -fsS --max-time 20 "$FASTAPI/openapi.json" >/dev/null
+
+                                    echo "[2] llama.cpp health"
+                                    curl -fsS --max-time 20 "$QWEN/health" >/dev/null
+
+                                    echo "[3] llama.cpp model list"
+                                    curl -fsS --max-time 20 "$QWEN/v1/models" -o /tmp/models.json
+                                    grep -q "\"data\"" /tmp/models.json
+
+                                    echo "[4] Direct llama.cpp inference"
+                                    curl -fsS --max-time 180 "$QWEN/v1/chat/completions" \
+                                        -H "Content-Type: application/json" \
+                                        -d "{\"model\":\"qwen2:0.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"max_tokens\":16,\"stream\":false}" \
+                                        -o /tmp/direct.json
+                                    grep -q "\"choices\"" /tmp/direct.json
+                                    grep -q "\"usage\"" /tmp/direct.json
+
+                                    echo "[5] FastAPI end-to-end inference"
+                                    curl -fsS --max-time 180 "$FASTAPI/v1/chat/completions" \
+                                        -H "Content-Type: application/json" \
+                                        -d "{\"model\":\"qwen2:0.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"max_tokens\":16,\"stream\":false}" \
+                                        -o /tmp/app.json
+                                    grep -q "\"choices\"" /tmp/app.json
+                                    grep -q "\"usage\"" /tmp/app.json
+
+                                    echo "PASS: all smoke tests passed"
+                                '
+
+                            kubectl -n "$K8S_NAMESPACE" get deployments,pods,services
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "CD succeeded. Deployed tag: ${params.IMAGE_TAG}. Security scan and smoke tests both passed."
+        }
+        failure {
+            echo 'CD failed. Inspect the failing parallel branch: Harbor Trivy scan or Smoke Tests.'
+        }
+        always {
+            echo "CD result: ${currentBuild.currentResult}; image tag: ${params.IMAGE_TAG}"
+        }
+    }
+}
