@@ -1,5 +1,6 @@
 import json
 import logging
+from prometheus_fastapi_instrumentator import Instrumentator
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
@@ -13,6 +14,13 @@ from app.llama_client import LlamaClient
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="LLM Serving API", version="0.1.0")
+# 注册 HTTP 指标采集，并暴露 Prometheus /metrics 端点
+Instrumentator().instrument(app).expose(
+    app,
+    endpoint="/metrics",
+    include_in_schema=False,
+)
+
 llama = LlamaClient()
 
 
