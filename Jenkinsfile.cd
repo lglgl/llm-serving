@@ -26,6 +26,7 @@ pipeline {
         APP_IMAGE = 'llm-serving'
         LLAMA_IMAGE = 'llm-serving-llama'
         HARBOR_IP = '127.0.0.1'
+        IMAGE_TAG = "${params.IMAGE_TAG}"
 
         K8S_CONTEXT = 'docker-desktop'
         K8S_NAMESPACE = 'llm-serving'
