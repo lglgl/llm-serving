@@ -48,7 +48,7 @@ pipeline {
                     test -n "$IMAGE_TAG"
                     # Restrict the tag to normal Docker/OCI tag characters.
                     case "$IMAGE_TAG" in
-                        *[!a-zA-Z0-9\_.-]*)
+                        *[!a-zA-Z0-9_.-]*)
                             echo "Invalid IMAGE_TAG: $IMAGE_TAG"
                             exit 1
                             ;;
