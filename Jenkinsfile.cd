@@ -2,7 +2,9 @@ pipeline {
     agent any
 
     options {
+        // Prevent concurrent CD builds from changing the same Kubernetes workloads.
         disableConcurrentBuilds()
+        // Bound the total runtime if a rollout, scan, or inference test hangs.
         timeout(time: 60, unit: 'MINUTES')
         timestamps()
     }
@@ -26,7 +28,10 @@ pipeline {
         APP_IMAGE = 'llm-serving'
         LLAMA_IMAGE = 'llm-serving-llama'
         HARBOR_IP = '127.0.0.1'
+
+        // Explicitly export parameters for shell steps that use `set -u`.
         IMAGE_TAG = "${params.IMAGE_TAG}"
+        FAIL_ON_CRITICAL = "${params.FAIL_ON_CRITICAL}"
 
         K8S_CONTEXT = 'docker-desktop'
         K8S_NAMESPACE = 'llm-serving'
@@ -48,6 +53,8 @@ pipeline {
                     echo "Commit: $(git rev-parse --short HEAD)"
                     echo "Deploying image tag: $IMAGE_TAG"
                     test -n "$IMAGE_TAG"
+
+                    # Restrict the tag to normal Docker/OCI tag characters.
                     case "$IMAGE_TAG" in
                         *[!a-zA-Z0-9_.-]*)
                             echo "Invalid IMAGE_TAG: $IMAGE_TAG"
@@ -63,9 +70,12 @@ pipeline {
                 sh '''
                     set -eu
                     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+                    # Explicitly select the intended local Kubernetes cluster.
                     kubectl config use-context "$K8S_CONTEXT"
                     kubectl get nodes
 
+                    # Jenkins runs on the host; resolve Harbor to its local published port.
                     HARBOR_URL="http://$HARBOR"
                     portal_status=$(curl --silent --show-error \
                         --connect-timeout 5 --max-time 10 \
@@ -91,6 +101,7 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
+                        # Never print credentials to the Jenkins console.
                         set +x
                         export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
@@ -98,12 +109,14 @@ pipeline {
                         kubectl create namespace "$K8S_NAMESPACE" \
                             --dry-run=client -o yaml | kubectl apply -f -
 
+                        # Create/update the pull secret used by Kubernetes for private Harbor images.
                         kubectl -n "$K8S_NAMESPACE" create secret docker-registry harbor-pull-secret \
                             --docker-server="$HARBOR" \
                             --docker-username="$HARBOR_USER" \
                             --docker-password="$HARBOR_PASSWORD" \
                             --dry-run=client -o yaml | kubectl apply -f -
 
+                        # Deploy both images with the same release tag.
                         helm upgrade --install llm-serving ./k8s \
                             --namespace "$K8S_NAMESPACE" \
                             --create-namespace \
@@ -111,6 +124,7 @@ pipeline {
                             --set-string image.tag="$IMAGE_TAG" \
                             --set-string llamaImage.tag="$IMAGE_TAG"
 
+                        # Attach the pull secret to both workload pod templates.
                         kubectl -n "$K8S_NAMESPACE" patch deployment "$APP_DEPLOYMENT" \
                             --type=merge \
                             -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"harbor-pull-secret"}]}}}}'
@@ -119,12 +133,13 @@ pipeline {
                             --type=merge \
                             -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"harbor-pull-secret"}]}}}}'
 
+                        # Wait until the new ReplicaSets are ready before testing.
                         kubectl -n "$K8S_NAMESPACE" rollout status \
                             "deployment/$APP_DEPLOYMENT" --timeout=240s
                         kubectl -n "$K8S_NAMESPACE" rollout status \
                             "deployment/$LLAMA_DEPLOYMENT" --timeout=360s
 
-                        # Remove legacy resources if they were created outside the current Helm release.
+                        # Remove obsolete resources left by the previous Ollama-based deployment.
                         kubectl -n "$K8S_NAMESPACE" delete deployment llm-serving-ollama --ignore-not-found
                         kubectl -n "$K8S_NAMESPACE" delete service llm-serving-ollama --ignore-not-found
 
@@ -135,6 +150,7 @@ pipeline {
         }
 
         stage('Security Scan and Smoke Tests') {
+            // Both checks run concurrently after deployment; either failing branch fails CD.
             parallel {
                 stage('Harbor Trivy Security Scan') {
                     options { timeout(time: 25, unit: 'MINUTES') }
@@ -151,8 +167,10 @@ pipeline {
                                 set +x
                                 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-                                # Scanner adapter is cluster-internal; check its metadata endpoint from inside Kubernetes.
-                                kubectl -n "$HARBOR_NAMESPACE" delete pod trivy-endpoint-check --ignore-not-found --wait=true
+                                # Trivy is cluster-internal. Probe its metadata endpoint from a pod
+                                # in Harbor's namespace rather than from the Jenkins host.
+                                kubectl -n "$HARBOR_NAMESPACE" delete pod trivy-endpoint-check \
+                                    --ignore-not-found --wait=true
                                 kubectl -n "$HARBOR_NAMESPACE" run trivy-endpoint-check \
                                     --image=curlimages/curl:8.12.1 \
                                     --restart=Never --rm -i --attach \
@@ -160,6 +178,7 @@ pipeline {
                                     'curl -fsS --max-time 15 http://harbor-trivy:8080/api/v1/metadata'
 
                                 API="http://$HARBOR/api/v2.0"
+
                                 scan_image() {
                                     repo="$1"
                                     tag="$2"
@@ -171,9 +190,14 @@ pipeline {
                                         -X POST "$artifact_url/scan")
                                     case "$code" in
                                         200|202) ;;
-                                        *) echo "Scan trigger failed for $repo:$tag (HTTP $code)"; cat /tmp/scan-trigger.json; return 1 ;;
+                                        *)
+                                            echo "Scan trigger failed for $repo:$tag (HTTP $code)"
+                                            cat /tmp/scan-trigger.json
+                                            return 1
+                                            ;;
                                     esac
 
+                                    # Harbor scans are asynchronous; poll for a terminal result.
                                     attempt=0
                                     while [ "$attempt" -lt 60 ]; do
                                         attempt=$((attempt + 1))
@@ -181,21 +205,43 @@ pipeline {
                                             "$artifact_url?with_scan_overview=true" \
                                             -o /tmp/scan-overview.json
 
+                                        # Use double quotes inside Python. The Python source is passed
+                                        # as a shell single-quoted argument, so inner single quotes
+                                        # would terminate it and corrupt the script.
                                         result=$(python3 -c '
 import json, sys
-d=json.load(open(sys.argv[1]))
-overview=d.get("scan_overview") or {}
-items=list(overview.values()) if isinstance(overview, dict) else []
+d = json.load(open(sys.argv[1]))
+overview = d.get("scan_overview") or {}
+items = list(overview.values()) if isinstance(overview, dict) else []
 if not items:
     print("WAIT|no-report|0|0|0")
-    raise SystemExit
-s=items[0]
-status=str(s.get("scan_status") or s.get("status") or "unknown")
-summary=s.get("summary") or {}
-critical=int(summary.get("critical", 0) or 0)
-high=int(summary.get("high", 0) or 0)
-total=int(summary.get("total", critical + high) or 0)
-print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
+    raise SystemExit(0)
+s = items[0]
+status = str(s.get("scan_status") or s.get("status") or "unknown")
+summary = s.get("summary") or {}
+# Harbor commonly nests severity counts under summary["summary"], while total/fixable
+# counts sit one level above. Support both nested and flat response formats.
+counts = summary.get("summary") if isinstance(summary, dict) else {}
+if not isinstance(counts, dict) or not counts:
+    counts = summary if isinstance(summary, dict) else {}
+def count_for(name):
+    for key, value in counts.items():
+        if str(key).lower() == name.lower():
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+critical = count_for("critical")
+high = count_for("high")
+try:
+    total = int(summary.get("total") or 0)
+except (AttributeError, TypeError, ValueError):
+    total = 0
+if total == 0:
+    total = sum(int(v or 0) for v in counts.values() if isinstance(v, (int, float)))
+severity = str(s.get("severity") or "unknown")
+print("{}|{}|{}|{}|{}".format(status, severity, critical, high, total))
 ' /tmp/scan-overview.json)
 
                                         status=$(printf '%s' "$result" | cut -d '|' -f 1)
@@ -230,6 +276,7 @@ print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
                                     return 1
                                 }
 
+                                # Scan both the API image and the llama.cpp/model runtime image.
                                 scan_image "$APP_IMAGE" "$IMAGE_TAG"
                                 scan_image "$LLAMA_IMAGE" "$IMAGE_TAG"
                                 echo "Both image scans completed."
@@ -245,6 +292,7 @@ print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
                             set -eu
                             export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
+                            # Confirm both workloads are ready before making requests.
                             kubectl -n "$K8S_NAMESPACE" rollout status \
                                 "deployment/$APP_DEPLOYMENT" --timeout=240s
                             kubectl -n "$K8S_NAMESPACE" rollout status \
@@ -254,6 +302,9 @@ print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
                             kubectl -n "$K8S_NAMESPACE" delete pod "$TEST_POD" \
                                 --ignore-not-found=true --wait=true
 
+                            # The script below is passed as one single-quoted argument to `sh -ec`.
+                            # Write JSON to a file using a heredoc to avoid nested quote/brace parsing
+                            # errors that previously broke curl's -d argument.
                             kubectl -n "$K8S_NAMESPACE" run "$TEST_POD" \
                                 --image=curlimages/curl:8.12.1 \
                                 --restart=Never --rm -i --attach \
@@ -272,10 +323,14 @@ print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
                                     curl -fsS --max-time 20 "$QWEN/v1/models" -o /tmp/models.json
                                     grep -q "\"data\"" /tmp/models.json
 
+                                    cat > /tmp/request.json <<EOF
+{"model":"qwen2:0.5b","messages":[{"role":"user","content":"Reply with OK"}],"max_tokens":16,"stream":false}
+EOF
+
                                     echo "[4] Direct llama.cpp inference"
                                     curl -fsS --max-time 180 "$QWEN/v1/chat/completions" \
                                         -H "Content-Type: application/json" \
-                                        -d "{\"model\":\"qwen2:0.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"max_tokens\":16,\"stream\":false}" \
+                                        --data-binary @/tmp/request.json \
                                         -o /tmp/direct.json
                                     grep -q "\"choices\"" /tmp/direct.json
                                     grep -q "\"usage\"" /tmp/direct.json
@@ -283,7 +338,7 @@ print(f"{status}|{s.get('severity', 'unknown')}|{critical}|{high}|{total}")
                                     echo "[5] FastAPI end-to-end inference"
                                     curl -fsS --max-time 180 "$FASTAPI/v1/chat/completions" \
                                         -H "Content-Type: application/json" \
-                                        -d "{\"model\":\"qwen2:0.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"max_tokens\":16,\"stream\":false}" \
+                                        --data-binary @/tmp/request.json \
                                         -o /tmp/app.json
                                     grep -q "\"choices\"" /tmp/app.json
                                     grep -q "\"usage\"" /tmp/app.json
