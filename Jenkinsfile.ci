@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -24,6 +25,7 @@ pipeline {
                     echo "Workspace: $(pwd)"
                     echo "Commit: $(git rev-parse --short HEAD)"
                     echo "Branch: $(git branch --show-current)"
+                    echo "Build Number: $BUILD_NUMBER"
                 '''
             }
         }
@@ -33,16 +35,20 @@ pipeline {
                 sh '''
                     set -eu
                     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
                     command -v docker
                     docker version
                     command -v python3
                     python3 --version
+                    command -v helm
 
                     HARBOR_URL="http://$HARBOR"
+
                     portal_status=$(curl --silent --show-error \
                         --connect-timeout 5 --max-time 10 \
                         --resolve "harbor.local:30080:$HARBOR_IP" \
                         -o /dev/null -w '%{http_code}' "$HARBOR_URL/")
+
                     test "$portal_status" = "200" || {
                         echo "Harbor Portal check failed: HTTP $portal_status"
                         exit 1
@@ -52,9 +58,15 @@ pipeline {
                         --connect-timeout 5 --max-time 10 \
                         --resolve "harbor.local:30080:$HARBOR_IP" \
                         -o /dev/null -w '%{http_code}' "$HARBOR_URL/v2/")
+
                     case "$registry_status" in
-                        200|401) echo "Harbor Registry API OK: HTTP $registry_status" ;;
-                        *) echo "Harbor Registry API failed: HTTP $registry_status"; exit 1 ;;
+                        200|401)
+                            echo "Harbor Registry API OK: HTTP $registry_status"
+                            ;;
+                        *)
+                            echo "Harbor Registry API failed: HTTP $registry_status"
+                            exit 1
+                            ;;
                     esac
                 '''
             }
@@ -64,6 +76,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     test -f Dockerfile
                     test -f requirements.txt
                     test -f app/main.py
@@ -73,25 +86,35 @@ pipeline {
                     test -f k8s/values.yaml
 
                     MODEL_FILE="llama/models/qwen2-0_5b-instruct-q4_k_m.gguf"
+
                     if git ls-files --error-unmatch "$MODEL_FILE" >/dev/null 2>&1; then
                         echo "ERROR: GGUF model must not be committed to Git"
                         exit 1
                     fi
-                    echo "Required files found; GGUF model is not tracked by Git."
+
+                    echo "Required files found."
+                    echo "GGUF model is not tracked by Git."
                 '''
             }
         }
 
         stage('Python Tests') {
-            options { timeout(time: 15, unit: 'MINUTES') }
+            options {
+                timeout(time: 15, unit: 'MINUTES')
+            }
             steps {
                 sh '''
                     set -eu
+
                     python3 -m venv .venv-ci
                     .venv-ci/bin/python -m pip install --upgrade pip
                     .venv-ci/bin/python -m pip install -r requirements.txt pytest
-                    PYTHONPATH="$WORKSPACE" .venv-ci/bin/python -m compileall -q app
-                    PYTHONPATH="$WORKSPACE" .venv-ci/bin/python -m pytest -q
+
+                    PYTHONPATH="$WORKSPACE" \
+                        .venv-ci/bin/python -m compileall -q app
+
+                    PYTHONPATH="$WORKSPACE" \
+                        .venv-ci/bin/python -m pytest -q
                 '''
             }
         }
@@ -101,75 +124,152 @@ pipeline {
                 sh '''
                     set -eu
                     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
                     helm lint ./k8s
-                    helm template llm-serving ./k8s -n llm-serving -f k8s/values.yaml >/tmp/llm-serving-rendered.yaml
-                    if grep -Eiq 'OLLAMA_BASE_URL|llm-serving-ollama|ollamaImage' /tmp/llm-serving-rendered.yaml; then
+
+                    helm template llm-serving ./k8s \
+                        -n llm-serving \
+                        -f k8s/values.yaml \
+                        > /tmp/llm-serving-rendered.yaml
+
+                    if grep -Eiq \
+                        'OLLAMA_BASE_URL|llm-serving-ollama|ollamaImage' \
+                        /tmp/llm-serving-rendered.yaml; then
+
                         echo "ERROR: rendered Helm manifest contains legacy Ollama configuration"
-                        grep -Ein 'OLLAMA_BASE_URL|llm-serving-ollama|ollamaImage' /tmp/llm-serving-rendered.yaml || true
+
+                        grep -Ein \
+                            'OLLAMA_BASE_URL|llm-serving-ollama|ollamaImage' \
+                            /tmp/llm-serving-rendered.yaml || true
+
                         exit 1
                     fi
+
+                    echo "Helm validation passed."
                 '''
             }
         }
 
-        stage('Build Images') {
+        /*
+         * Each branch builds and pushes its own image.
+         *
+         * FastAPI does not wait for the llama.cpp image build.
+         * llama.cpp does not wait for the FastAPI image build.
+         */
+        stage('Build and Push Images in Parallel') {
+            failFast false
+
             parallel {
-                stage('Build FastAPI') {
-                    options { timeout(time: 20, unit: 'MINUTES') }
+                stage('FastAPI: Build and Push') {
+                    options {
+                        timeout(time: 30, unit: 'MINUTES')
+                    }
                     steps {
-                        sh '''
-                            set -eu
-                            export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-                            IMAGE="$HARBOR/$HARBOR_PROJECT/$APP_IMAGE"
-                            docker build --pull --progress=plain \
-                                -t "$IMAGE:$BUILD_NUMBER" \
-                                -t "$IMAGE:latest" \
-                                -f Dockerfile .
-                            docker image inspect "$IMAGE:$BUILD_NUMBER" >/dev/null
-                        '''
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'harbor-credentials',
+                                usernameVariable: 'HARBOR_USER',
+                                passwordVariable: 'HARBOR_PASSWORD'
+                            )
+                        ]) {
+                            sh '''
+                                set -eu
+                                set +x
+                                export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+                                IMAGE="$HARBOR/$HARBOR_PROJECT/$APP_IMAGE"
+
+                                echo "========================================"
+                                echo "FastAPI Image Build"
+                                echo "Image: $IMAGE:$BUILD_NUMBER"
+                                echo "========================================"
+
+                                # Build both tags in one Docker build.
+                                docker build --pull --progress=plain \
+                                    -t "$IMAGE:$BUILD_NUMBER" \
+                                    -t "$IMAGE:latest" \
+                                    -f Dockerfile .
+
+                                docker image inspect "$IMAGE:$BUILD_NUMBER" >/dev/null
+
+                                echo "FastAPI image built successfully."
+
+                                # Authenticate and push this image immediately.
+                                printf '%s' "$HARBOR_PASSWORD" |
+                                    docker login "$HARBOR" \
+                                        -u "$HARBOR_USER" \
+                                        --password-stdin
+
+                                trap 'docker logout "$HARBOR" >/dev/null 2>&1 || true' EXIT
+
+                                echo "Pushing FastAPI build tag..."
+                                docker push "$IMAGE:$BUILD_NUMBER"
+
+                                echo "Pushing FastAPI latest tag..."
+                                docker push "$IMAGE:latest"
+
+                                echo "FastAPI image upload completed."
+                                echo "Published: $IMAGE:$BUILD_NUMBER"
+                                echo "Published: $IMAGE:latest"
+                            '''
+                        }
                     }
                 }
-                stage('Build llama.cpp + Qwen') {
-                    options { timeout(time: 45, unit: 'MINUTES') }
-                    steps {
-                        sh '''
-                            set -eu
-                            export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-                            IMAGE="$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE"
-                            docker build --pull --progress=plain \
-                                -t "$IMAGE:$BUILD_NUMBER" \
-                                -t "$IMAGE:latest" \
-                                -f llama/Dockerfile llama
-                            docker image inspect "$IMAGE:$BUILD_NUMBER" >/dev/null
-                        '''
+
+                stage('llama.cpp + Qwen: Build and Push') {
+                    options {
+                        timeout(time: 60, unit: 'MINUTES')
                     }
-                }
-            }
-        }
+                    steps {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'harbor-credentials',
+                                usernameVariable: 'HARBOR_USER',
+                                passwordVariable: 'HARBOR_PASSWORD'
+                            )
+                        ]) {
+                            sh '''
+                                set -eu
+                                set +x
+                                export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-        stage('Push to Harbor') {
-            options { timeout(time: 20, unit: 'MINUTES') }
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'harbor-credentials',
-                        usernameVariable: 'HARBOR_USER',
-                        passwordVariable: 'HARBOR_PASSWORD'
-                    )
-                ]) {
-                    sh '''
-                        set -eu
-                        set +x
-                        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-                        trap 'docker logout "$HARBOR" >/dev/null 2>&1 || true' EXIT
-                        printf '%s' "$HARBOR_PASSWORD" |
-                            docker login "$HARBOR" -u "$HARBOR_USER" --password-stdin
+                                IMAGE="$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE"
 
-                        docker push "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:$BUILD_NUMBER"
-                        docker push "$HARBOR/$HARBOR_PROJECT/$APP_IMAGE:latest"
-                        docker push "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:$BUILD_NUMBER"
-                        docker push "$HARBOR/$HARBOR_PROJECT/$LLAMA_IMAGE:latest"
-                    '''
+                                echo "========================================"
+                                echo "llama.cpp + Qwen Image Build"
+                                echo "Image: $IMAGE:$BUILD_NUMBER"
+                                echo "========================================"
+
+                                # This build runs independently of the FastAPI build.
+                                docker build --pull --progress=plain \
+                                    -t "$IMAGE:$BUILD_NUMBER" \
+                                    -t "$IMAGE:latest" \
+                                    -f llama/Dockerfile llama
+
+                                docker image inspect "$IMAGE:$BUILD_NUMBER" >/dev/null
+
+                                echo "llama.cpp + Qwen image built successfully."
+
+                                # Push as soon as this image finishes building.
+                                printf '%s' "$HARBOR_PASSWORD" |
+                                    docker login "$HARBOR" \
+                                        -u "$HARBOR_USER" \
+                                        --password-stdin
+
+                                trap 'docker logout "$HARBOR" >/dev/null 2>&1 || true' EXIT
+
+                                echo "Pushing llama.cpp build tag..."
+                                docker push "$IMAGE:$BUILD_NUMBER"
+
+                                echo "Pushing llama.cpp latest tag..."
+                                docker push "$IMAGE:latest"
+
+                                echo "llama.cpp image upload completed."
+                                echo "Published: $IMAGE:$BUILD_NUMBER"
+                                echo "Published: $IMAGE:latest"
+                            '''
+                        }
+                    }
                 }
             }
         }
@@ -177,11 +277,33 @@ pipeline {
 
     post {
         success {
-            echo "CI succeeded. IMAGE_TAG=${env.BUILD_NUMBER}; latest tags also pushed to Harbor."
+            echo """
+            CI succeeded.
+            Build Number: ${env.BUILD_NUMBER}
+
+            Published images:
+            ${env.HARBOR}/${env.HARBOR_PROJECT}/${env.APP_IMAGE}:${env.BUILD_NUMBER}
+            ${env.HARBOR}/${env.HARBOR_PROJECT}/${env.APP_IMAGE}:latest
+            ${env.HARBOR}/${env.HARBOR_PROJECT}/${env.LLAMA_IMAGE}:${env.BUILD_NUMBER}
+            ${env.HARBOR}/${env.HARBOR_PROJECT}/${env.LLAMA_IMAGE}:latest
+
+            Both image builds and uploads completed.
+            CD can now deploy IMAGE_TAG=${env.BUILD_NUMBER}.
+            """
         }
+
         failure {
-            echo 'CI failed. CD should not be run until this build is green.'
+            echo """
+            CI failed.
+            Build Number: ${env.BUILD_NUMBER}
+            Inspect the failing build or push branch.
+
+            Note: failFast is disabled, so the other image branch can finish
+            even if one branch fails. Do not start CD unless both images
+            have been successfully published for this build.
+            """
         }
+
         always {
             echo "CI result: ${currentBuild.currentResult}; build: ${env.BUILD_NUMBER}"
         }

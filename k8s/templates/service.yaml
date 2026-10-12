@@ -12,3 +12,6 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: 8000
       protocol: TCP
+metadata:
+  labels:
+    app: llm-serving
