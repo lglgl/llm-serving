@@ -4,5 +4,5 @@ metadata:
   name: llm-serving-config
   namespace: {{ .Values.namespace }}
 data:
-  OLLAMA_BASE_URL: {{ .Values.ollama.baseUrl | quote }}
-  DEFAULT_MODEL: {{ .Values.ollama.model | quote }}
+  LLAMA_BASE_URL: {{ .Values.llama.baseUrl | quote }}
+  DEFAULT_MODEL: {{ .Values.llama.model | quote }}

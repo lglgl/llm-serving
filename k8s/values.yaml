@@ -1,31 +1,23 @@
-# 所有应用资源部署到该命名空间
 namespace: llm-serving
 
-# FastAPI 镜像配置
 image:
-  repository: llm-serving
-  tag: "0.2.1"
-  pullPolicy: IfNotPresent
+  repository: harbor.local:30080/library/llm-serving
+  tag: "latest"
+  pullPolicy: Always
 
-# FastAPI Service 配置
 service:
   type: ClusterIP
   port: 8000
 
-# Ollama 服务连接配置
-ollama:
-  baseUrl: "http://llm-serving-ollama:11434"
+llama:
+  baseUrl: "http://llm-serving-llama:8080/v1"
   model: "qwen2:0.5b"
 
-# Ollama 镜像配置
-ollamaImage:
-  repository: llm-serving-ollama
-  tag: "0.1.0"
-  pullPolicy: IfNotPresent
+llamaImage:
+  repository: harbor.local:30080/library/llm-serving-llama
+  tag: "latest"
+  pullPolicy: Always
 
-# 容器资源配置
-# requests 用于 Kubernetes 调度；
-# limits 用于限制容器可使用的资源。
 resources:
   fastapi:
     requests:
@@ -35,9 +27,9 @@ resources:
       cpu: 500m
       memory: 512Mi
 
-  ollama:
+  llama:
     requests:
-      cpu: 250m
+      cpu: 500m
       memory: 512Mi
     limits:
       cpu: "2"

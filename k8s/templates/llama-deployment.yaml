@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-serving-llama
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: llm-serving-llama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-serving-llama
+  template:
+    metadata:
+      labels:
+        app: llm-serving-llama
+    spec:
+      serviceAccountName: llm-serving-llama
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: harbor-pull-secret
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: llm-serving-llama
+          image: "{{ .Values.llamaImage.repository }}:{{ .Values.llamaImage.tag }}"
+          imagePullPolicy: {{ .Values.llamaImage.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources.llama | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3

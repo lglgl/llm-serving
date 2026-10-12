@@ -1,7 +1,5 @@
-
 import json
 import logging
-import time
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
@@ -9,19 +7,18 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.models import ChatRequest, ModelInfo, ModelListResponse
-from app.ollama_client import OllamaClient
+from app.llama_client import LlamaClient
 
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="LLM Serving API", version="0.1.0")
-ollama = OllamaClient()
+llama = LlamaClient()
 
 
 @app.get("/health")
 async def health() -> dict:
-    """检查 llama.cpp 后端是否可用。"""
-    backend_ok = await ollama.health()
+    backend_ok = await llama.health()
 
     if not backend_ok:
         raise HTTPException(
@@ -38,9 +35,8 @@ async def health() -> dict:
 
 @app.get("/v1/models", response_model=ModelListResponse)
 async def models() -> ModelListResponse:
-    """返回 OpenAI 兼容的模型列表。"""
     try:
-        result = await ollama.list_models()
+        result = await llama.list_models()
         model_list = result.get("data", [])
 
         return ModelListResponse(
@@ -62,13 +58,8 @@ async def _stream_openai(
     model: str,
     messages: list[dict],
 ) -> AsyncIterator[str]:
-    """
-    转发 llama.cpp 返回的 OpenAI SSE 数据。
-    统一输出 data: ... 格式，并保留 [DONE] 结束标记。
-    """
     try:
-        async for line in ollama.chat_stream(model, messages):
-            # SSE 可能包含注释或空行
+        async for line in llama.chat_stream(model, messages):
             if not line or line.startswith(":"):
                 continue
 
@@ -87,8 +78,6 @@ async def _stream_openai(
                 logger.warning("Invalid SSE JSON received from llama.cpp")
                 continue
 
-            # llama.cpp 已返回 OpenAI-compatible chunk，
-            # 无需再将 Ollama message.content 转换成 delta。
             yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     except Exception:
@@ -105,7 +94,6 @@ async def _stream_openai(
 
 @app.post("/v1/chat/completions")
 async def chat(request: ChatRequest):
-    """提供 OpenAI 兼容的聊天补全接口。"""
     model = request.model or settings.default_model
     messages = [
         {
@@ -127,12 +115,7 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        result = await ollama.chat(model=model, messages=messages)
-
-        # llama.cpp 的非流式响应已经是 OpenAI Chat Completion 格式。
-        # 保留模型返回的 id、choices、usage 等字段。
-        return result
-
+        return await llama.chat(model=model, messages=messages)
     except Exception as exc:
         logger.exception("llama.cpp chat request failed")
         raise HTTPException(
