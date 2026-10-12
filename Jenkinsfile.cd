@@ -25,7 +25,7 @@ pipeline {
         APP_IMAGE = 'llm-serving'
         LLAMA_IMAGE = 'llm-serving-llama'
         HARBOR_IP = '127.0.0.1'
-        // Explicitly export parameters for shell steps that use \`set -u\`.
+        // Explicitly export parameters for shell steps that use `set -u`.
         IMAGE_TAG = "${params.IMAGE_TAG}"
         FAIL_ON_CRITICAL = "${params.FAIL_ON_CRITICAL}"
         K8S_CONTEXT = 'docker-desktop'
@@ -274,7 +274,7 @@ print("{}|{}|{}|{}|{}".format(status, severity, critical, high, total))
                             TEST_POD="llm-smoke-test"
                             kubectl -n "$K8S_NAMESPACE" delete pod "$TEST_POD" \
                                 --ignore-not-found=true --wait=true
-                            # The script below is passed as one single-quoted argument to \`sh -ec\`.
+                            # The script below is passed as one single-quoted argument to `sh -ec`.
                             # Write JSON to a file using a heredoc to avoid nested quote/brace parsing
                             # errors that previously broke curl's -d argument.
                             kubectl -n "$K8S_NAMESPACE" run "$TEST_POD" \
