@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: llm-serving-llama
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: llm-serving-llama
 spec:
@@ -24,6 +24,21 @@ spec:
         - name: llm-serving-llama
           image: "{{ .Values.llamaImage.repository }}:{{ .Values.llamaImage.tag }}"
           imagePullPolicy: {{ .Values.llamaImage.pullPolicy }}
+          command: ["/app/llama-server"]
+          args:
+            - "-m"
+            - "/models/qwen2-0_5b-instruct-q4_k_m.gguf"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8080"
+            - "--alias"
+            - {{ .Values.llama.model | quote }}
+            - "-c"
+            - "2048"
+            - "--metrics"
+            - "--parallel"
+            - {{ .Values.llama.parallel | quote }}
           ports:
             - name: http
               containerPort: 8080

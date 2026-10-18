@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,12 @@ class Settings(BaseSettings):
 
     # 模型请求超时时间（秒）
     request_timeout: float = 300.0
+
+    # 必须与 llama.cpp --parallel 槽位数保持一致，用于测量 API 侧排队时间。
+    llama_parallel_slots: int = Field(default=4, ge=1)
+
+    # 等待模型槽位的最长时间；超时后返回服务不可用。
+    llm_queue_timeout_seconds: float = Field(default=300.0, gt=0)
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,132 +1,158 @@
-# LLM 指标查询
+# LLM Serving Grafana 面板与 PromQL
 
-FastAPI 通过 `/metrics` 暴露 Prometheus 指标。请求指标带有 `model`、`status`、`stream` 标签；
-Token 与流式性能指标带有 `model`、`stream` 标签。传入非默认模型名时，应用会将 `model` 收敛为 `other`，
-避免 Prometheus 时序数量无限增长。
+Dashboard 仅包含 8 个推理性能面板：TTFT、TPOT、ITL 近似值、E2E、Output Tokens/s、Prompt Processing Throughput、后端并发/队列深度、FastAPI 模型槽位等待时间。错误率、超时与流式中断指标不放在此性能 Dashboard 中；FastAPI `/metrics` 仍保留这些应用诊断指标。
 
-下面表达式可直接放入 Grafana Prometheus 面板。假设 Grafana 变量 `$model` 默认值为 `qwen2:0.5b`，
-`$stream` 的值为 `false` 或 `true`。
+查询优先采用 llama.cpp 原生指标；后端没有对应口径时使用 FastAPI 指标。Dashboard 源文件为 `k8s/dashboards/llm-serving-performance.json`。所有原生 llama.cpp 查询依赖 ServiceMonitor 注入 `model` 标签；Docker Compose ServiceMonitor 和 Helm Chart 都已配置此标签。
 
-## LLM 请求速率
+## 面板数据源一览
 
-按模型、结果和流式状态显示每秒请求数。每个 `model/status/stream` 组合会单独形成一条时间序列。
+| 面板 | 来源 | 口径 |
+| --- | --- | --- |
+| TTFT · 流式首个内容块 | FastAPI | 收到请求到首个非空 SSE 内容块的 P50/P95/P99 |
+| TPOT · 原生服务平均与单请求分位数 | llama.cpp + FastAPI | 原生总生成耗时/生成 Token 数；辅助显示 FastAPI 单请求 P50/P95 |
+| ITL 近似值 · SSE 内容块间隔 | FastAPI | 相邻非空 SSE 内容块间隔 P50/P95/P99，不等于逐 Token ITL |
+| 端到端延迟 · E2E | FastAPI | 包含应用模型槽位等待和后端推理的请求时长，按 stream 区分 |
+| Output Tokens/s · 单请求与服务聚合 | FastAPI + llama.cpp | 单请求 P50/P95 与服务聚合生成 Token/s 分开展示 |
+| Prompt Processing Throughput | llama.cpp | 原生 Prompt tokens/s Gauge 与输入 Token Counter 的 5 分钟速率 |
+| 并发请求数与模型后端排队深度 | llama.cpp | `requests_processing` 与 `requests_deferred` 原生 Gauge |
+| FastAPI 模型槽位排队时间 | FastAPI | 请求等待应用并发槽位的 P50/P95，按 stream 区分 |
 
-```promql
-sum by (model, status, stream) (
-  rate(llm_requests_total{model="$model"}[$__rate_interval])
-)
-```
+## TTFT · 首个流式内容块 P50/P95/P99
 
-可以分别筛选 `status="success"`、`status="error"` 和 `stream="false"` / `"true"`。
-
-## LLM 请求延迟 P50 / P90 / P95
-
-分别将 `0.50`、`0.90`、`0.95` 替换为需要的分位数；`$stream` 可选 `false` 或 `true`。
-
-```promql
-histogram_quantile(
-  0.50,
-  sum by (le) (
-    rate(llm_request_duration_seconds_bucket{model="$model", stream="$stream"}[$__rate_interval])
-  )
-)
-```
-
-直方图需有多个样本才适合观察分位数。没有请求或只有刚启动的服务时，面板可能暂时显示 No data。
-
-## Input / Output / Total Tokens per second
-
-Token/s 根据 Token Counter 的变化率计算。总 Token/s 是输入和输出速率相加，无需另设重复 Counter。
-
-```promql
-sum(rate(llm_input_tokens_total{model="$model", stream="$stream"}[$__rate_interval]))
-```
-
-```promql
-sum(rate(llm_output_tokens_total{model="$model", stream="$stream"}[$__rate_interval]))
-```
-
-```promql
-sum(rate(llm_input_tokens_total{model="$model", stream="$stream"}[$__rate_interval]))
-+ sum(rate(llm_output_tokens_total{model="$model", stream="$stream"}[$__rate_interval]))
-```
-
-Token 计数依赖 llama.cpp 返回 `usage`。后端未提供用量时，Token/s 不会伪造数值，而由用量缺失指标记录。
-
-## TTFT P95
-
-TTFT 表示请求开始到首个非空生成内容的时间。当前只对流式生成记录观测值。
+llama.cpp 没有与 API 接收请求到首个 SSE 内容块等价的原生指标，因此使用 FastAPI Histogram。它包含等待 FastAPI 模型槽位的时间。
 
 ```promql
 histogram_quantile(
   0.95,
   sum by (le) (
-    rate(llm_ttft_seconds_bucket{model="$model", stream="true"}[$__rate_interval])
+    rate(llm_ttft_seconds_bucket{model=~"$model", stream="true"}[$__rate_interval])
   )
 )
 ```
 
-## TPOT P95
+将 `0.95` 替换为 `0.50` 或 `0.99` 可查看 P50/P99。
 
-TPOT 用生成区间除以首 Token 之后的输出 Token 数计算；至少需要两个输出 Token 和有效 usage。
+## TPOT · 原生服务平均与单请求分位数
+
+主口径使用 llama.cpp 原生累计生成耗时和生成 Token 数之比，是 Token 加权的服务级平均秒/Token，不是单请求 P 分位数：
+
+```promql
+sum by (model) (rate(llamacpp:tokens_predicted_seconds_total{model=~"$model"}[5m]))
+/
+clamp_min(sum by (model) (rate(llamacpp:tokens_predicted_total{model=~"$model"}[5m])), 1e-9)
+```
+
+FastAPI 依赖返回的 Token usage 计算单请求平均生成耗时，面板辅助展示其 P50/P95：
 
 ```promql
 histogram_quantile(
   0.95,
   sum by (le) (
-    rate(llm_tpot_seconds_bucket{model="$model", stream="true"}[$__rate_interval])
+    rate(llm_tpot_seconds_bucket{model=~"$model", stream="true"}[$__rate_interval])
   )
 )
 ```
 
-## 单请求输出速度 P95
+如果推理后端未返回 usage，FastAPI 单请求 TPOT 不会有新样本；原生服务级平均仍可以由 llama.cpp Counter 计算。
 
-每个流式请求的输出 Token/s 作为一个 Histogram 样本，再计算请求分布的 P95。
+## ITL 近似值 · SSE 内容块间隔
+
+llama.cpp 不报告下游 FastAPI 收到的 SSE 内容块时间间隔。该面板使用 FastAPI 对相邻非空内容块间隔的 P50/P95/P99。SSE 内容块可能包含多个 Token，故不应解读为精确逐 Token ITL。
 
 ```promql
 histogram_quantile(
   0.95,
   sum by (le) (
-    rate(llm_output_tokens_per_second_bucket{model="$model", stream="true"}[$__rate_interval])
+    rate(llm_inter_chunk_interval_seconds_bucket{model=~"$model", stream="true"}[$__rate_interval])
   )
 )
 ```
 
-## Token 用量缺失计数（窗口增量）
+## 端到端延迟 · E2E P50/P95/P99
 
-下面示例显示近 5 分钟缺少有效 usage 的请求数。
+使用 FastAPI 完整请求时长，按流式与非流式分组：
 
 ```promql
-sum by (model, stream) (
-  increase(llm_token_usage_missing_total{model="$model", stream="$stream"}[5m])
+histogram_quantile(
+  0.95,
+  sum by (le, stream) (
+    rate(llm_request_duration_seconds_bucket{model=~"$model"}[$__rate_interval])
+  )
 )
 ```
 
-## LLM 请求并发
+## Output Tokens/s · 单请求与服务聚合
 
-这是瞬时 Gauge，不要对它使用 `rate()`。
-
-```promql
-llm_requests_in_progress{model="$model", stream="$stream"}
-```
-
-## 所选时间范围内的 LLM 请求总数
-
-Grafana `$__range` 会展开为当前面板时间范围。
+单请求 P95：
 
 ```promql
-sum by (model, status, stream) (
-  increase(llm_requests_total{model="$model"}[$__range])
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(llm_output_tokens_per_second_bucket{model=~"$model", stream="true"}[$__rate_interval])
+  )
 )
 ```
 
-## 验证采集链路
+服务聚合生成吞吐使用 llama.cpp 原生 Token Counter：
 
-1. 直接访问 FastAPI 的 `http://<服务地址>:8000/metrics`，确认出现 `llm_requests_total`、
-   `llm_input_tokens_total`、`llm_ttft_seconds_bucket` 和 `llm_tpot_seconds_bucket`。
-2. Prometheus Targets 中确认 FastAPI `/metrics` target 为 `UP`。
-3. 先制造几次流式及非流式请求，再运行上述查询。Prometheus 的抓取间隔为 30 秒，刚产生的样本可能要等一次抓取。
+```promql
+sum by (model) (rate(llamacpp:tokens_predicted_total{model=~"$model"}[5m]))
+```
 
-注意：仓库里的 `ServiceMonitor` 只发现 Kubernetes Service。使用 Docker Compose 时，
-集群 Prometheus 不会自动发现宿主机上的 Compose API；需要让 Prometheus 能访问 Compose 主机并添加静态抓取目标，
-或将更新后的应用部署进 Kubernetes。Counter/Histogram 的 `rate()`、`increase()` 和分位数查询也需要足够的抓取样本。
+## Prompt Processing Throughput
+
+llama.cpp 原生即时报告值：
+
+```promql
+llamacpp:prompt_tokens_seconds{model=~"$model"}
+```
+
+5 分钟服务聚合输入 Token 速率：
+
+```promql
+sum by (model) (rate(llamacpp:prompt_tokens_total{model=~"$model"}[5m]))
+```
+
+第一条是后端原生 Gauge，空闲时可能为 0；第二条是 Counter 的窗口速率，刚启动或窗口内没有 Prompt 请求时可能没有有效值。llama.cpp 的 `prompt_tokens_total` 明确不计入从缓存复用的 Prompt Token，因此高缓存命中场景下它会低于客户端提交的输入 Token 数。
+
+## 后端并发请求与排队深度
+
+两条均来自 llama.cpp 原生 Gauge：
+
+```promql
+sum by (model) (llamacpp:requests_processing{model=~"$model"})
+```
+
+```promql
+sum by (model) (llamacpp:requests_deferred{model=~"$model"})
+```
+
+## FastAPI 模型槽位排队时间
+
+llama.cpp 只提供后端当前 deferred 请求数，不提供 FastAPI 槽位等待耗时。因此此面板用 FastAPI Queue Histogram：
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, stream) (
+    rate(llm_queue_wait_seconds_bucket{model=~"$model"}[$__rate_interval])
+  )
+)
+```
+
+## 无数据检查
+
+1. 先确认 Grafana Dashboard 使用平台 Prometheus 数据源 `prometheus`，模型变量能解析出 `qwen2:0.5b`。
+2. 检查 Prometheus Targets 中 API 与 llama.cpp 两个目标均为 `UP`。Docker Compose 抓取时分别确认 Docker host gateway 的 `8002` 和 `8081` 可达。
+3. 直接检查 API `/metrics` 是否有 `llm_ttft_seconds_bucket`、`llm_request_duration_seconds_bucket` 等样本；检查 llama.cpp `/metrics` 是否有 `llamacpp:tokens_predicted_total`、`llamacpp:requests_processing` 等指标。
+4. 运行流式请求产生 TTFT/ITL/请求延迟样本，再等待抓取间隔和至少一个 PromQL rate 窗口。Histogram 分位数在窗口内没有观测时不会返回数据。
+5. 检查 ServiceMonitor 的 `release` 标签、namespace selector、Service selector/命名端口，以及原生指标的 `model` relabeling。
+
+## 抓取与 Dashboard 配置
+
+- llama.cpp 启动参数必须包含 `--metrics`。
+- Kubernetes ServiceMonitor 由应用 Helm Chart 创建；平台 Prometheus 要允许跨 Namespace 发现 ServiceMonitor，并选中对应 release 标签。
+- Dashboard JSON 由 Helm Chart 作为 `grafana_dashboard: "1"` ConfigMap 发布；Grafana sidecar 必须跨 Namespace 搜索 ConfigMap。
+- Docker Compose 临时抓取资源位于平台仓库 `observability/kube-prometheus-stack/llm-serving-docker.yaml`。仅在抓取本机 Compose 实例时使用，Kubernetes 正式部署不要重复应用。
+- 建议 15 秒抓取间隔。直方图使用 `$__rate_interval`，样本少或时间范围过短时分位数会显示 No data。

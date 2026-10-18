@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: llm-serving
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: llm-serving
 spec:
@@ -41,7 +41,7 @@ spec:
               containerPort: 8000
               protocol: TCP
 
-          # 从 ConfigMap 注入 Ollama 地址和默认模型
+          # 从 ConfigMap 注入 llama.cpp 地址、默认模型和并发槽位配置。
           envFrom:
             - configMapRef:
                 name: llm-serving-config
@@ -60,7 +60,7 @@ spec:
             failureThreshold: 30
 
           # 就绪探针：调用 /health。
-          # /health 在 Ollama 不可用时返回 503，从而使 Pod 被移出 Service 后端，
+          # /health 在 llama.cpp 不可用时返回 503，从而使 Pod 被移出 Service 后端，
           # 实现 fail-closed（不再把流量转发到无法推理的实例）。
           readinessProbe:
             httpGet:
@@ -71,7 +71,7 @@ spec:
             failureThreshold: 3
 
           # 存活探针：仅检查 FastAPI 端口是否仍可接受 TCP 连接
-          # 避免 Ollama 短暂不可用时，仅因依赖异常就反复重启 FastAPI
+          # 避免 llama.cpp 短暂不可用时，仅因依赖异常就反复重启 FastAPI
           livenessProbe:
             tcpSocket:
               port: http

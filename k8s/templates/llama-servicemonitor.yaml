@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llm-serving-llama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: {{ .Values.monitoring.prometheusRelease | quote }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app: llm-serving-llama
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.scrapeInterval }}
+      relabelings:
+        - targetLabel: model
+          replacement: {{ .Values.llama.model | quote }}
+          action: replace

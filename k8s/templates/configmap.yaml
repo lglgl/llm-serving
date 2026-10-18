@@ -2,7 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: llm-serving-config
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
 data:
   LLAMA_BASE_URL: {{ .Values.llama.baseUrl | quote }}
   DEFAULT_MODEL: {{ .Values.llama.model | quote }}
+  LLAMA_PARALLEL_SLOTS: {{ .Values.llama.parallel | quote }}

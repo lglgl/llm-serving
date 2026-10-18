@@ -5,6 +5,20 @@ services:
     image: llm-serving-llama:local
     container_name: llm-serving-llama
     restart: unless-stopped
+    command:
+      - -m
+      - /models/qwen2-0_5b-instruct-q4_k_m.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --alias
+      - qwen2:0.5b
+      - -c
+      - "2048"
+      - --metrics
+      - --parallel
+      - ${LLAMA_PARALLEL_SLOTS:-4}
     ports:
       - "8081:8080"
     healthcheck:
@@ -27,6 +41,8 @@ services:
     environment:
       LLAMA_BASE_URL: http://llm-serving-llama:8080/v1
       DEFAULT_MODEL: qwen2:0.5b
+      LLAMA_PARALLEL_SLOTS: ${LLAMA_PARALLEL_SLOTS:-4}
+      LLM_QUEUE_TIMEOUT_SECONDS: ${LLM_QUEUE_TIMEOUT_SECONDS:-300}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}

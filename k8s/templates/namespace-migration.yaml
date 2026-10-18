@@ -1,0 +1,9 @@
+{{- if .Values.namespaceMigration.keepLegacyResource }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  annotations:
+    # 迁移时先让旧 release 记录 keep 策略，下一次升级移除该清单时 Helm 不会删除 Namespace。
+    helm.sh/resource-policy: keep
+{{- end }}

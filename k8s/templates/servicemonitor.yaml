@@ -2,17 +2,17 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: llm-serving
-  namespace: llm-serving
+  namespace: {{ .Release.Namespace }}
   labels:
-    release: kube-prometheus-stack
+    release: {{ .Values.monitoring.prometheusRelease | quote }}
 spec:
   namespaceSelector:
     matchNames:
-      - llm-serving
+      - {{ .Release.Namespace }}
   selector:
     matchLabels:
       app: llm-serving
   endpoints:
     - port: http
       path: /metrics
-      interval: 30s
+      interval: {{ .Values.monitoring.scrapeInterval }}

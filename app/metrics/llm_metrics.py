@@ -24,6 +24,13 @@ LLM_REQUEST_DURATION = Histogram(
     "llm_request_duration_seconds",
     "End-to-end LLM request duration in seconds",
     ["model", "stream"],
+    buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300),
+)
+LLM_QUEUE_WAIT = Histogram(
+    "llm_queue_wait_seconds",
+    "Time spent waiting for an application model slot",
+    ["model", "stream"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300),
 )
 LLM_INPUT_TOKENS = Counter(
     "llm_input_tokens",
@@ -44,7 +51,13 @@ LLM_TTFT = Histogram(
     "llm_ttft_seconds",
     "Time from request start to first non-empty generated content",
     ["model", "stream"],
-    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120),
+)
+LLM_INTER_CHUNK_INTERVAL = Histogram(
+    "llm_inter_chunk_interval_seconds",
+    "Interval between non-empty streaming content chunks; an approximation of ITL",
+    ["model", "stream"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
 )
 LLM_GENERATION_DURATION = Histogram(
     "llm_generation_duration_seconds",
@@ -57,6 +70,16 @@ LLM_TPOT = Histogram(
     "Average time per output token after the first token",
     ["model", "stream"],
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2),
+)
+LLM_REQUEST_TIMEOUTS = Counter(
+    "llm_request_timeouts",
+    "LLM requests that timed out, grouped by timeout stage",
+    ["model", "stream", "stage"],
+)
+LLM_STREAM_INTERRUPTED = Counter(
+    "llm_stream_interrupted",
+    "Streaming requests cancelled before normal completion",
+    ["model"],
 )
 LLM_OUTPUT_TOKENS_PER_SECOND = Histogram(
     "llm_output_tokens_per_second",

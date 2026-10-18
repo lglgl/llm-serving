@@ -95,23 +95,25 @@ pipeline {
                         kubectl config use-context "$K8S_CONTEXT"
                         kubectl create namespace "$K8S_NAMESPACE" \
                             --dry-run=client -o yaml | kubectl apply -f -
-                        # Ensure the existing namespace has the ownership metadata required by Helm.
-                        kubectl label namespace "$K8S_NAMESPACE" \
-                            app.kubernetes.io/managed-by=Helm --overwrite
-                        kubectl annotate namespace "$K8S_NAMESPACE" \
-                            meta.helm.sh/release-name=llm-serving --overwrite
-                        kubectl annotate namespace "$K8S_NAMESPACE" \
-                            meta.helm.sh/release-namespace="$K8S_NAMESPACE" --overwrite
                         # Create/update the pull secret used by Kubernetes for private Harbor images.
                         kubectl -n "$K8S_NAMESPACE" create secret docker-registry harbor-pull-secret \
                             --docker-server="$HARBOR" \
                             --docker-username="$HARBOR_USER" \
                             --docker-password="$HARBOR_PASSWORD" \
                             --dry-run=client -o yaml | kubectl apply -f -
+                        # One-time safe handoff for releases whose old manifest managed the Namespace.
+                        if helm get manifest llm-serving --namespace "$K8S_NAMESPACE" 2>/dev/null | grep -q '^kind: Namespace$'; then
+                            echo "Protecting the legacy Namespace resource before handing ownership to Kubernetes."
+                            helm upgrade llm-serving ./k8s \
+                                --namespace "$K8S_NAMESPACE" \
+                                --values k8s/values.yaml \
+                                --set namespaceMigration.keepLegacyResource=true \
+                                --set-string image.tag="$IMAGE_TAG" \
+                                --set-string llamaImage.tag="$IMAGE_TAG"
+                        fi
                         # Deploy both images with the same release tag.
                         helm upgrade --install llm-serving ./k8s \
                             --namespace "$K8S_NAMESPACE" \
-                            --create-namespace \
                             --values k8s/values.yaml \
                             --set-string image.tag="$IMAGE_TAG" \
                             --set-string llamaImage.tag="$IMAGE_TAG"

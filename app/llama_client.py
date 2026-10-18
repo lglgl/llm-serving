@@ -182,7 +182,7 @@ class LlamaClient:
 
         try:
             async with httpx.AsyncClient(
-                timeout=None,
+                timeout=self.timeout,
                 trust_env=False,
             ) as client:
                 async with client.stream(

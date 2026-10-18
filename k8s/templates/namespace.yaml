@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  # 命名空间名称与 values.yaml 中的 namespace 保持一致；
-  # 若后续通过 values 调整命名空间，此处会同步创建对应的命名空间对象，
-  # 避免硬编码导致资源被部署到名称不符的命名空间。
-  name: {{ .Values.namespace }}
