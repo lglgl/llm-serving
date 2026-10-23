@@ -13,7 +13,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: llm-serving
+              {{- toYaml .Values.gateway.podLabels | nindent 14 }}
       ports:
         - protocol: TCP
           port: 8080

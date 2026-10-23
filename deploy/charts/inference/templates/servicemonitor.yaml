@@ -18,5 +18,5 @@ spec:
       interval: {{ .Values.monitoring.scrapeInterval }}
       relabelings:
         - targetLabel: model
-          replacement: {{ .Values.llama.model | quote }}
+          replacement: {{ .Values.model.alias | quote }}
           action: replace

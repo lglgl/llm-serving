@@ -22,29 +22,29 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: llm-serving-llama
-          image: "{{ .Values.llamaImage.repository }}:{{ .Values.llamaImage.tag }}"
-          imagePullPolicy: {{ .Values.llamaImage.pullPolicy }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/llama-server"]
           args:
             - "-m"
-            - "/models/qwen2-0_5b-instruct-q4_k_m.gguf"
+            - {{ .Values.llama.modelPath | quote }}
             - "--host"
             - "0.0.0.0"
             - "--port"
             - "8080"
             - "--alias"
-            - {{ .Values.llama.model | quote }}
+            - {{ .Values.model.alias | quote }}
             - "-c"
-            - "2048"
+            - {{ .Values.llama.contextSize | quote }}
             - "--metrics"
             - "--parallel"
-            - {{ .Values.llama.parallel | quote }}
+            - {{ .Values.model.parallel | quote }}
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
           resources:
-            {{- toYaml .Values.resources.llama | nindent 12 }}
+            {{- toYaml .Values.resources | nindent 12 }}
           startupProbe:
             httpGet:
               path: /health

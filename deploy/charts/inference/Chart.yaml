@@ -1,0 +1,7 @@
+apiVersion: v2
+name: llm-serving-inference
+description: llama.cpp inference backend for LLM Serving
+type: application
+version: 0.2.0
+appVersion: "0.1.0"
+icon: https://helm.sh/img/helm.svg

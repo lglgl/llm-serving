@@ -12,10 +12,14 @@ service:
 namespaceMigration:
   keepLegacyResource: false
 
-llama:
-  baseUrl: "http://llm-serving-llama:8080/v1"
-  model: "qwen2:0.5b"
+# 共享模型配置；部署时由 deploy/values/model.yaml 覆盖。
+model:
+  alias: "qwen2:0.5b"
   parallel: 4
+
+# 推理服务的 OpenAI-compatible 地址，由 inference Chart 的 Service 提供。
+backend:
+  baseUrl: "http://llm-serving-llama:8080/v1"
 
 monitoring:
   # 平台 Prometheus 所在的 Namespace，用于网络策略放通。
@@ -29,24 +33,10 @@ ingress:
   # devops-platform 的 ingress-nginx Controller 所在 Namespace。
   namespace: ingress
 
-llamaImage:
-  repository: harbor.local:30080/library/llm-serving-llama
-  tag: "latest"
-  pullPolicy: Always
-
 resources:
-  fastapi:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-
-  llama:
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: "2"
-      memory: 2Gi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

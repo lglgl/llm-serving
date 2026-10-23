@@ -1,7 +1,7 @@
 services:
   llm-serving-llama:
     build:
-      context: ./llama
+      context: ./inference/engines/llamacpp
     image: llm-serving-llama:local
     container_name: llm-serving-llama
     restart: unless-stopped
@@ -13,7 +13,7 @@ services:
       - --port
       - "8080"
       - --alias
-      - qwen2:0.5b
+      - ${MODEL_ALIAS:-qwen2:0.5b}
       - -c
       - "2048"
       - --metrics
@@ -31,7 +31,7 @@ services:
 
   api:
     build:
-      context: .
+      context: ./gateway
     image: llm-serving:local
     container_name: llm-serving
     restart: unless-stopped
@@ -40,7 +40,7 @@ services:
         condition: service_healthy
     environment:
       LLAMA_BASE_URL: http://llm-serving-llama:8080/v1
-      DEFAULT_MODEL: qwen2:0.5b
+      DEFAULT_MODEL: ${MODEL_ALIAS:-qwen2:0.5b}
       LLAMA_PARALLEL_SLOTS: ${LLAMA_PARALLEL_SLOTS:-4}
       LLM_QUEUE_TIMEOUT_SECONDS: ${LLM_QUEUE_TIMEOUT_SECONDS:-300}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}

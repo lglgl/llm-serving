@@ -2,8 +2,8 @@
 """对 FastAPI + llama.cpp 执行有限时长的并发压测并核对 Prometheus 指标。
 
 用法：
-  BASE_URL=http://127.0.0.1:8002 python tests/load_metrics.py
-  python tests/load_metrics.py --duration 120 --concurrency 3 --stream-every 2
+  BASE_URL=http://127.0.0.1:8002 python bench/tools/load_metrics.py
+  python bench/tools/load_metrics.py --duration 120 --concurrency 3 --stream-every 2
 
 环境变量可使用 BASE_URL、DURATION_SECONDS、CONCURRENCY、REQUEST_TIMEOUT、
 MODEL 和 STREAM_EVERY 设置默认值。默认运行 60 秒、并发 2，适合本地模型。

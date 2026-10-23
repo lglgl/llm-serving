@@ -48,7 +48,7 @@ spec:
 
           # CPU 和内存资源配置由 values.yaml 统一管理
           resources:
-            {{- toYaml .Values.resources.fastapi | nindent 12 }}
+            {{- toYaml .Values.resources | nindent 12 }}
 
           # 启动探针：确认 FastAPI 端口已经开始监听
           # 在启动探针成功前，Readiness 和 Liveness 不会执行

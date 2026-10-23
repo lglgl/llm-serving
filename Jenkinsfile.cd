@@ -8,10 +8,17 @@ pipeline {
         timestamps()
     }
     parameters {
+        // Each component is released on its own. Leave a tag empty to keep that component as deployed.
+        // CI archives ci-tags.env with the tags it actually built.
         string(
-            name: 'IMAGE_TAG',
-            defaultValue: 'latest',
-            description: 'Harbor image tag to deploy. For a reproducible release, use the CI build number.'
+            name: 'GATEWAY_TAG',
+            defaultValue: '',
+            description: 'FastAPI gateway image tag (CI build number). Empty: do not deploy the gateway.'
+        )
+        string(
+            name: 'INFERENCE_TAG',
+            defaultValue: '',
+            description: 'llama.cpp inference image tag (CI build number). Empty: do not deploy inference.'
         )
         booleanParam(
             name: 'FAIL_ON_CRITICAL',
@@ -26,7 +33,8 @@ pipeline {
         LLAMA_IMAGE = 'llm-serving-llama'
         HARBOR_IP = '127.0.0.1'
         // Explicitly export parameters for shell steps that use `set -u`.
-        IMAGE_TAG = "${params.IMAGE_TAG}"
+        GATEWAY_TAG = "${params.GATEWAY_TAG}"
+        INFERENCE_TAG = "${params.INFERENCE_TAG}"
         FAIL_ON_CRITICAL = "${params.FAIL_ON_CRITICAL}"
         K8S_CONTEXT = 'docker-desktop'
         K8S_NAMESPACE = 'llm-serving'
@@ -44,15 +52,21 @@ pipeline {
                 sh '''
                     set -eu
                     echo "Commit: $(git rev-parse --short HEAD)"
-                    echo "Deploying image tag: $IMAGE_TAG"
-                    test -n "$IMAGE_TAG"
-                    # Restrict the tag to normal Docker/OCI tag characters.
-                    case "$IMAGE_TAG" in
-                        *[!a-zA-Z0-9_.-]*)
-                            echo "Invalid IMAGE_TAG: $IMAGE_TAG"
-                            exit 1
-                            ;;
-                    esac
+                    echo "Gateway tag: ${GATEWAY_TAG:-(not deployed)}"
+                    echo "Inference tag: ${INFERENCE_TAG:-(not deployed)}"
+                    if [ -z "$GATEWAY_TAG" ] && [ -z "$INFERENCE_TAG" ]; then
+                        echo "Set GATEWAY_TAG and/or INFERENCE_TAG"
+                        exit 1
+                    fi
+                    # Restrict tags to normal Docker/OCI tag characters.
+                    for tag in "$GATEWAY_TAG" "$INFERENCE_TAG"; do
+                        case "$tag" in
+                            *[!a-zA-Z0-9_.-]*)
+                                echo "Invalid image tag: $tag"
+                                exit 1
+                                ;;
+                        esac
+                    done
                 '''
             }
         }
@@ -101,34 +115,15 @@ pipeline {
                             --docker-username="$HARBOR_USER" \
                             --docker-password="$HARBOR_PASSWORD" \
                             --dry-run=client -o yaml | kubectl apply -f -
-                        # One-time safe handoff for releases whose old manifest managed the Namespace.
-                        if helm get manifest llm-serving --namespace "$K8S_NAMESPACE" 2>/dev/null | grep -q '^kind: Namespace$'; then
-                            echo "Protecting the legacy Namespace resource before handing ownership to Kubernetes."
-                            helm upgrade llm-serving ./k8s \
-                                --namespace "$K8S_NAMESPACE" \
-                                --values k8s/values.yaml \
-                                --set namespaceMigration.keepLegacyResource=true \
-                                --set-string image.tag="$IMAGE_TAG" \
-                                --set-string llamaImage.tag="$IMAGE_TAG"
+                        # One-time handoff of llama.cpp resources from the old single release.
+                        deploy/scripts/migrate-split-release.sh
+                        # Backend first, so a new gateway never points at an older inference contract.
+                        if [ -n "$INFERENCE_TAG" ]; then
+                            deploy/scripts/deploy.sh inference "$INFERENCE_TAG"
                         fi
-                        # Deploy both images with the same release tag.
-                        helm upgrade --install llm-serving ./k8s \
-                            --namespace "$K8S_NAMESPACE" \
-                            --values k8s/values.yaml \
-                            --set-string image.tag="$IMAGE_TAG" \
-                            --set-string llamaImage.tag="$IMAGE_TAG"
-                        # Attach the pull secret to both workload pod templates.
-                        kubectl -n "$K8S_NAMESPACE" patch deployment "$APP_DEPLOYMENT" \
-                            --type=merge \
-                            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"harbor-pull-secret"}]}}}}'
-                        kubectl -n "$K8S_NAMESPACE" patch deployment "$LLAMA_DEPLOYMENT" \
-                            --type=merge \
-                            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"harbor-pull-secret"}]}}}}'
-                        # Wait until the new ReplicaSets are ready before testing.
-                        kubectl -n "$K8S_NAMESPACE" rollout status \
-                            "deployment/$APP_DEPLOYMENT" --timeout=240s
-                        kubectl -n "$K8S_NAMESPACE" rollout status \
-                            "deployment/$LLAMA_DEPLOYMENT" --timeout=360s
+                        if [ -n "$GATEWAY_TAG" ]; then
+                            deploy/scripts/deploy.sh gateway "$GATEWAY_TAG"
+                        fi
                         # Remove obsolete resources left by the previous Ollama-based deployment.
                         kubectl -n "$K8S_NAMESPACE" delete deployment llm-serving-ollama --ignore-not-found
                         kubectl -n "$K8S_NAMESPACE" delete service llm-serving-ollama --ignore-not-found
@@ -254,10 +249,14 @@ print("{}|{}|{}|{}|{}".format(status, severity, critical, high, total))
                                     cat /tmp/scan-overview.json
                                     return 1
                                 }
-                                # Scan both the API image and the llama.cpp/model runtime image.
-                                scan_image "$APP_IMAGE" "$IMAGE_TAG"
-                                scan_image "$LLAMA_IMAGE" "$IMAGE_TAG"
-                                echo "Both image scans completed."
+                                # Scan only the images deployed by this run.
+                                if [ -n "$GATEWAY_TAG" ]; then
+                                    scan_image "$APP_IMAGE" "$GATEWAY_TAG"
+                                fi
+                                if [ -n "$INFERENCE_TAG" ]; then
+                                    scan_image "$LLAMA_IMAGE" "$INFERENCE_TAG"
+                                fi
+                                echo "Image scans completed."
                             '''
                         }
                     }
@@ -274,6 +273,9 @@ print("{}|{}|{}|{}|{}".format(status, severity, critical, high, total))
                             kubectl -n "$K8S_NAMESPACE" rollout status \
                                 "deployment/$LLAMA_DEPLOYMENT" --timeout=360s
                             TEST_POD="llm-smoke-test"
+                            # Use the same model alias that both charts were deployed with.
+                            MODEL_ALIAS=$(sed -n 's/^  alias: *//p' deploy/values/model.yaml | tr -d '"')
+                            test -n "$MODEL_ALIAS"
                             kubectl -n "$K8S_NAMESPACE" delete pod "$TEST_POD" \
                                 --ignore-not-found=true --wait=true
                             # The script below is passed as one single-quoted argument to `sh -ec`.
@@ -282,6 +284,7 @@ print("{}|{}|{}|{}|{}".format(status, severity, critical, high, total))
                             kubectl -n "$K8S_NAMESPACE" run "$TEST_POD" \
                                 --image=curlimages/curl:8.12.1 \
                                 --restart=Never --rm -i --attach \
+                                --env "MODEL_ALIAS=$MODEL_ALIAS" \
                                 --command -- sh -ec '
                                     set -eu
                                     FASTAPI="http://llm-serving:8000"
@@ -294,7 +297,7 @@ print("{}|{}|{}|{}|{}".format(status, severity, critical, high, total))
                                     curl -fsS --max-time 20 "$QWEN/v1/models" -o /tmp/models.json
                                     grep -q "\"data\"" /tmp/models.json
                                     cat > /tmp/request.json <<EOF
-{"model":"qwen2:0.5b","messages":[{"role":"user","content":"Reply with OK"}],"max_tokens":16,"stream":false}
+{"model":"$MODEL_ALIAS","messages":[{"role":"user","content":"Reply with OK"}],"max_tokens":16,"stream":false}
 EOF
                                     echo "[4] Direct llama.cpp inference"
                                     curl -fsS --max-time 180 "$QWEN/v1/chat/completions" \
@@ -321,13 +324,13 @@ EOF
     }
     post {
         success {
-            echo "CD succeeded. Deployed tag: ${params.IMAGE_TAG}. Security scan and smoke tests both passed."
+            echo "CD succeeded. Gateway: ${params.GATEWAY_TAG ?: 'unchanged'}; inference: ${params.INFERENCE_TAG ?: 'unchanged'}. Security scan and smoke tests both passed."
         }
         failure {
             echo 'CD failed. Inspect the failing parallel branch: Harbor Trivy scan or Smoke Tests.'
         }
         always {
-            echo "CD result: ${currentBuild.currentResult}; image tag: ${params.IMAGE_TAG}"
+            echo "CD result: ${currentBuild.currentResult}; gateway: ${params.GATEWAY_TAG ?: 'unchanged'}; inference: ${params.INFERENCE_TAG ?: 'unchanged'}"
         }
     }
 }

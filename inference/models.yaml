@@ -1,0 +1,68 @@
+# 推理模型登记表：下载脚本和 vLLM 启动脚本都从这里读取模型信息。
+# 权重不进 Git，也不进镜像；实际目录为 $MODEL_ROOT/<dir>。
+#
+# 字段：
+#   modelscope_id  ModelScope 仓库 ID（国内源）
+#   dir            $MODEL_ROOT 下的目录名
+#   dtype          vLLM --dtype；量化权重一般用 auto
+#   quantization   vLLM --quantization；非量化模型留空
+#   tp             允许的张量并行度（注意力头数必须能被整除）
+#   approx_gb      权重大小估算，用于规划存储
+
+models:
+  qwen3-8b:
+    modelscope_id: Qwen/Qwen3-8B
+    dir: Qwen3-8B
+    dtype: bfloat16
+    quantization: ""
+    tp: [1, 2, 4, 8]
+    approx_gb: 16.4
+  qwen3-8b-awq:
+    modelscope_id: Qwen/Qwen3-8B-AWQ
+    dir: Qwen3-8B-AWQ
+    dtype: auto
+    quantization: awq
+    tp: [1, 2, 4, 8]
+    approx_gb: 6
+  qwen3-14b:
+    modelscope_id: Qwen/Qwen3-14B
+    dir: Qwen3-14B
+    dtype: bfloat16
+    quantization: ""
+    tp: [1, 2, 4, 8]
+    approx_gb: 29.6
+  qwen3-14b-awq:
+    modelscope_id: Qwen/Qwen3-14B-AWQ
+    dir: Qwen3-14B-AWQ
+    dtype: auto
+    quantization: awq
+    tp: [1, 2, 4, 8]
+    approx_gb: 10
+  qwen3-32b:
+    modelscope_id: Qwen/Qwen3-32B
+    dir: Qwen3-32B
+    dtype: bfloat16
+    quantization: ""
+    tp: [2, 4, 8]
+    approx_gb: 65.6
+  qwen3-32b-awq:
+    modelscope_id: Qwen/Qwen3-32B-AWQ
+    dir: Qwen3-32B-AWQ
+    dtype: auto
+    quantization: awq
+    tp: [1, 2, 4, 8]
+    approx_gb: 19
+  qwen2.5-72b:
+    modelscope_id: Qwen/Qwen2.5-72B-Instruct
+    dir: Qwen2.5-72B-Instruct
+    dtype: bfloat16
+    quantization: ""
+    tp: [4, 8]
+    approx_gb: 145.4
+  qwen2.5-72b-awq:
+    modelscope_id: Qwen/Qwen2.5-72B-Instruct-AWQ
+    dir: Qwen2.5-72B-Instruct-AWQ
+    dtype: auto
+    quantization: awq
+    tp: [1, 2, 4, 8]
+    approx_gb: 41

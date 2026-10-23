@@ -1,0 +1,33 @@
+image:
+  repository: harbor.local:30080/library/llm-serving-llama
+  tag: "latest"
+  pullPolicy: Always
+
+# 共享模型配置；部署时由 deploy/values/model.yaml 覆盖。
+model:
+  alias: "qwen2:0.5b"
+  parallel: 4
+
+llama:
+  # 镜像内的 GGUF 路径，由 inference/engines/llamacpp/Dockerfile 打包。
+  modelPath: /models/qwen2-0_5b-instruct-q4_k_m.gguf
+  contextSize: 2048
+
+# 只允许带这些标签的 Pod（gateway）访问推理端口。
+gateway:
+  podLabels:
+    app: llm-serving
+
+monitoring:
+  # 平台 Prometheus 所在的 Namespace，用于网络策略放通。
+  namespace: observability
+  scrapeInterval: 15s
+  prometheusRelease: kube-prometheus-stack
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi

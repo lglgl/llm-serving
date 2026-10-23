@@ -2,7 +2,7 @@
 
 Dashboard 仅包含 8 个推理性能面板：TTFT、TPOT、ITL 近似值、E2E、Output Tokens/s、Prompt Processing Throughput、后端并发/队列深度、FastAPI 模型槽位等待时间。错误率、超时与流式中断指标不放在此性能 Dashboard 中；FastAPI `/metrics` 仍保留这些应用诊断指标。
 
-查询优先采用 llama.cpp 原生指标；后端没有对应口径时使用 FastAPI 指标。Dashboard 源文件为 `k8s/dashboards/llm-serving-performance.json`。所有原生 llama.cpp 查询依赖 ServiceMonitor 注入 `model` 标签；Docker Compose ServiceMonitor 和 Helm Chart 都已配置此标签。
+查询优先采用 llama.cpp 原生指标；后端没有对应口径时使用 FastAPI 指标。Dashboard 源文件为 `deploy/charts/gateway/dashboards/llm-serving-performance.json`。所有原生 llama.cpp 查询依赖 ServiceMonitor 注入 `model` 标签；Docker Compose ServiceMonitor 和 Helm Chart 都已配置此标签。
 
 ## 面板数据源一览
 
