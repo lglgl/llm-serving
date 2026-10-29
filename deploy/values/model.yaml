@@ -1,5 +1,0 @@
-# 两个 Chart 共用的模型配置：CD 部署 gateway 和 inference 时都会传入本文件。
-# 改模型别名或并发槽位只改这里，避免 FastAPI 槽位数与 llama.cpp --parallel 不一致。
-model:
-  alias: "qwen2:0.5b"
-  parallel: 4

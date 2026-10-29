@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: llm-serving-config
-  namespace: {{ .Release.Namespace }}
-data:
-  LLAMA_BASE_URL: {{ .Values.backend.baseUrl | quote }}
-  DEFAULT_MODEL: {{ .Values.model.alias | quote }}
-  LLAMA_PARALLEL_SLOTS: {{ .Values.model.parallel | quote }}
