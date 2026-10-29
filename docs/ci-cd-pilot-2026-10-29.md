@@ -47,3 +47,31 @@
 - 修复：smoke 重试现在捕获 `RemoteDisconnected` 所属的连接/HTTP 异常；后续再跑完整 CI。
 
 状态：CI 扫描和构建通过；容器 smoke 待重跑。
+
+### 步骤 3：完整本地 CI 重跑
+
+- 将试点代码提交到本地 `dev`：`349c0f3cd326`，确保镜像标签与本次源码一致；未推送远端。
+- 执行 `SEMGREP_BIN="$HOME/.local/helmsman-tools/bin/semgrep" bash scripts/ci-pilot.sh`，结果 `CI_PILOT_RESULT=passed`。
+- 8 项 pytest 全部通过；Starlette/httpx 弃用警告仍存在。
+- gitleaks 扫描应用、测试、pilot、chart、脚本、Jenkinsfile 和 README，无泄漏发现；Semgrep 对 `app/` 扫描无阻断发现。
+- 网关与 mock 镜像均以 `349c0f3cd326` 构建成功；Trivy 两镜像的 CRITICAL 漏洞扫描均为 0。Trivy 提示部分漏洞严重级别采用其他厂商数据源，属于扫描器说明。
+- 动态映射端口 smoke 通过：`/readyz` ready、`/health` healthy、模型别名 `qwen3:8b` 可见、聊天请求返回确定性 mock 回复。脚本退出时清理 CI 容器和网络。
+
+状态：本地 CI 全部通过。Jenkins Job 未触发：API 403 且 Job 仍指向旧 `main`；此次未推送远端、未运行 Jenkins Credentials 的 Harbor push stage，因此不能视为 Jenkins 构建或 Harbor 发布成功。
+
+### 步骤 4：Kubernetes CD 与回滚
+
+- 使用 `docker-desktop` context，在新建隔离 namespace `llm-serving-pilot` 执行 `bash scripts/cd-pilot.sh 349c0f3cd326 349c0f3cd326`。Helm Chart lint 通过，网关与 mock Deployment 均 rollout 成功。
+- 首轮部署 smoke 通过。随后脚本以无害的 Pod-template stamp 变更生成新 Helm revision，再执行 Helm rollback。
+- 首次 CD 尝试回滚成功，但回滚替换了网关 Pod，使原 `kubectl port-forward` 随旧 Pod 终止；回滚后的 smoke 得到 Connection refused。日志确认新 Pod Running，服务可通过重新建立 port-forward 访问。故障归因为脚本生命周期处理不完整，不是应用回滚失败。
+- 修复 CD 脚本：每次 smoke 前等待端口转发可用；回滚后停止旧转发并重新启动，检查转发进程退出并输出日志。
+- 重跑 CD：初始 smoke 通过，试验升级成功，回滚到 revision 4 成功，回滚后的 readiness/model/chat smoke 再次通过；结果 `CD_PILOT_RESULT=passed`。最终 Helm release 保持 deployed，隔离 namespace 保留供检查。
+- 本地 Docker Desktop 使用共享镜像缓存，Chart 配置 `imagePullPolicy: Never`。因此验证的是本机构建镜像到本地 Kubernetes 的发布/回滚链路；没有验证集群从 Harbor 拉取镜像。
+
+状态：本地 Kubernetes CD 和 Helm 回滚通过；真实模型权重、GPU 推理、Harbor push/pull、Jenkins 执行均不在已验证范围。
+
+### 结果与待办
+
+- 已证明：网关代码测试、镜像构建与本地安全扫描、mock 推理链路、Kubernetes 沙箱部署和 Helm 回滚。
+- 尚未证明：远程 Jenkins CI、Harbor 鉴权推送/集群拉取、真实 vLLM/权重发布、模型质量评测或生产入口。
+- 后续若要接真实模型发布：先修复 Jenkins Job SCM/脚本分支配置并提供受控 Jenkins API 执行通道；验证 Harbor 凭据和节点拉取，再单独规划 GPU/权重存储、模型版本与质量门禁。不要把当前 mock CD 作为真实模型验收证据。

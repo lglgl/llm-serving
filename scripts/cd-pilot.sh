@@ -32,13 +32,31 @@ kubectl rollout status deployment/"$RELEASE"-mock -n "$NAMESPACE" --timeout=180s
 BASE_REVISION="$(helm history "$RELEASE" -n "$NAMESPACE" -o json | python3 -c 'import json,sys; print(max(int(x["revision"]) for x in json.load(sys.stdin)))')"
 LOCAL_PORT="${CD_SMOKE_PORT:-18081}"
 PORT_FORWARD_LOG="${TMPDIR:-/tmp}/llm-serving-pilot-port-forward.log"
-kubectl port-forward -n "$NAMESPACE" "svc/$RELEASE" "$LOCAL_PORT:8000" >"$PORT_FORWARD_LOG" 2>&1 &
-PORT_FORWARD_PID=$!
+PORT_FORWARD_PID=""
+start_port_forward() {
+  kubectl port-forward -n "$NAMESPACE" "svc/$RELEASE" "$LOCAL_PORT:8000" >"$PORT_FORWARD_LOG" 2>&1 &
+  PORT_FORWARD_PID=$!
+  for _ in $(seq 1 30); do
+    if curl --silent --fail "http://127.0.0.1:$LOCAL_PORT/readyz" >/dev/null; then
+      return 0
+    fi
+    if ! kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1; then
+      cat "$PORT_FORWARD_LOG" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  cat "$PORT_FORWARD_LOG" >&2
+  return 1
+}
 cleanup() {
-  kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+  if [[ -n "$PORT_FORWARD_PID" ]]; then
+    kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
+start_port_forward
 python3 "$ROOT_DIR/scripts/smoke_api.py" "http://127.0.0.1:$LOCAL_PORT"
 
 # Exercise Helm's recorded rollback path using a harmless Pod-template stamp change.
@@ -52,6 +70,10 @@ helm upgrade "$RELEASE" "$CHART" \
   --wait --timeout 180s
 helm rollback "$RELEASE" "$BASE_REVISION" -n "$NAMESPACE" --wait --timeout 180s
 kubectl rollout status deployment/"$RELEASE" -n "$NAMESPACE" --timeout=180s
+kill "$PORT_FORWARD_PID" >/dev/null 2>&1 || true
+wait "$PORT_FORWARD_PID" 2>/dev/null || true
+PORT_FORWARD_PID=""
+start_port_forward
 python3 "$ROOT_DIR/scripts/smoke_api.py" "http://127.0.0.1:$LOCAL_PORT"
 
 printf 'CD_PILOT_RESULT=passed\nNAMESPACE=%s\nRELEASE=%s\nAPP_IMAGE=%s\nMOCK_IMAGE=%s\nROLLBACK_TO_REVISION=%s\n' \
