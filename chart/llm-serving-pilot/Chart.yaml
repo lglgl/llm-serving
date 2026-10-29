@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llm-serving-pilot
+description: Local CI/CD pilot for the LLM Serving API gateway and deterministic backend
+type: application
+version: 0.1.0
+appVersion: "0.2.0"

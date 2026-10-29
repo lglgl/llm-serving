@@ -31,6 +31,14 @@ async def health() -> dict:
     }
 
 
+@app.get("/readyz")
+async def readiness() -> dict:
+    """Kubernetes readiness must include the configured inference backend."""
+    if not await _backend_health(settings.vllm_api_base):
+        raise HTTPException(status_code=503, detail="vLLM backend unavailable")
+    return {"status": "ready", "service": "llm-serving"}
+
+
 @app.get("/v1/models", response_model=ModelListResponse)
 async def models() -> ModelListResponse:
     return ModelListResponse(data=[ModelInfo(id=settings.default_model)])

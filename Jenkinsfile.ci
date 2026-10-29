@@ -1,0 +1,59 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+        timestamps()
+    }
+
+    environment {
+        PATH = "/opt/homebrew/bin:${env.HOME}/.local/helmsman-tools/bin:${env.PATH}"
+        SEMGREP_ENABLE_VERSION_CHECK = '0'
+        SEMGREP_SEND_METRICS = 'off'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHA = sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.GIT_SHA}"
+                }
+            }
+        }
+
+        stage('Tests, scans, build and smoke') {
+            steps {
+                sh 'bash scripts/ci-pilot.sh'
+            }
+        }
+
+        stage('Push immutable images to Harbor') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'harbor-credentials',
+                                                  usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                    sh '''
+                        set -euo pipefail
+                        set +x
+                        echo "$HARBOR_PASSWORD" | docker login harbor.local:30080 -u "$HARBOR_USER" --password-stdin >/dev/null
+                        docker push "harbor.local:30080/library/llm-serving:${GIT_SHA}"
+                        docker push "harbor.local:30080/library/llm-serving-mock:${GIT_SHA}"
+                        docker image inspect "harbor.local:30080/library/llm-serving:${GIT_SHA}" --format '{{index .RepoDigests 0}}' > app-image-digest.txt
+                        docker image inspect "harbor.local:30080/library/llm-serving-mock:${GIT_SHA}" --format '{{index .RepoDigests 0}}' > mock-image-digest.txt
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'app-image-digest.txt,mock-image-digest.txt', allowEmptyArchive: true
+        }
+        success {
+            echo "CI pilot passed for ${env.GIT_SHA}; CD remains a separate, explicit job."
+        }
+    }
+}

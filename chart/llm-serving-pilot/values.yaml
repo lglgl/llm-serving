@@ -1,0 +1,35 @@
+image:
+  repository: harbor.local:30080/library/llm-serving
+  tag: local
+  pullPolicy: Never
+
+mockBackend:
+  enabled: true
+  image:
+    repository: harbor.local:30080/library/llm-serving-mock
+    tag: local
+    pullPolicy: Never
+
+model:
+  alias: qwen3:8b
+  upstream: Qwen/Qwen3-8B
+  apiBase: ""
+  requestTimeout: "30"
+
+deploymentStamp: pilot
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+mockResources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi

@@ -1,0 +1,37 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 20, unit: 'MINUTES')
+        timestamps()
+    }
+
+    parameters {
+        string(name: 'APP_TAG', defaultValue: '', description: 'Immutable llm-serving image tag from a successful CI build')
+        string(name: 'MOCK_TAG', defaultValue: '', description: 'Immutable llm-serving-mock tag from the same CI build')
+    }
+
+    stages {
+        stage('Validate inputs and cluster') {
+            steps {
+                script {
+                    if (!(params.APP_TAG ==~ /[0-9a-f]{12}/) || !(params.MOCK_TAG ==~ /[0-9a-f]{12}/)) {
+                        error('APP_TAG and MOCK_TAG must be 12-character Git SHA tags from CI')
+                    }
+                }
+                sh '''
+                    set -eu
+                    test "$(kubectl config current-context)" = docker-desktop
+                    kubectl get --raw=/readyz
+                '''
+            }
+        }
+
+        stage('Deploy and verify pilot') {
+            steps {
+                sh 'bash scripts/cd-pilot.sh "$APP_TAG" "$MOCK_TAG"'
+            }
+        }
+    }
+}

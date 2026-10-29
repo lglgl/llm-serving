@@ -79,3 +79,16 @@ Benchmark requests use the default model alias (`qwen3:8b`), which routes to vLL
 ## Change log
 
 See [CHANGELOG.md](CHANGELOG.md) for the recorded architecture and API changes.
+
+## CI/CD 小范围试点
+
+首轮试点用 `pilot/mock_vllm.py` 模拟 OpenAI-compatible 推理后端，验证网关测试、镜像构建、扫描、请求转发和 Kubernetes Helm 发布/回滚。它不包含真实模型权重或 GPU 推理。
+
+本地执行：
+
+```bash
+bash scripts/ci-pilot.sh
+bash scripts/cd-pilot.sh <gateway-image-tag> <mock-image-tag>
+```
+
+详细方案、逐步过程、故障和边界记录见 [`docs/ci-cd-pilot-2026-10-29.md`](docs/ci-cd-pilot-2026-10-29.md)。
