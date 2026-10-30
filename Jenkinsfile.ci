@@ -37,6 +37,9 @@ pipeline {
                     sh '''
                         set -euo pipefail
                         set +x
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
                         echo "$HARBOR_PASSWORD" | docker login harbor.local:30080 -u "$HARBOR_USER" --password-stdin >/dev/null
                         docker push "harbor.local:30080/library/llm-serving:${GIT_SHA}"
                         docker push "harbor.local:30080/library/llm-serving-mock:${GIT_SHA}"
