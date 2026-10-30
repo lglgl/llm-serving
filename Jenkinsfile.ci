@@ -26,7 +26,13 @@ pipeline {
 
         stage('Tests, scans, build and smoke') {
             steps {
-                sh 'bash scripts/ci-pilot.sh'
+                sh '''
+                    set -euo pipefail
+                    DOCKER_CONFIG="$(mktemp -d)"
+                    export DOCKER_CONFIG
+                    trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+                    bash scripts/ci-pilot.sh
+                '''
             }
         }
 
