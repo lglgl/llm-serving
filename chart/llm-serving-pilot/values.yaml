@@ -1,14 +1,14 @@
 image:
   repository: harbor.local:30080/library/llm-serving
-  tag: local
-  pullPolicy: Never
+  tag: afad3bf86756-harbor-20261030
+  pullPolicy: Always
 
 mockBackend:
   enabled: true
   image:
     repository: harbor.local:30080/library/llm-serving-mock
-    tag: local
-    pullPolicy: Never
+    tag: afad3bf86756
+    pullPolicy: Always
 
 model:
   alias: qwen3:8b
@@ -16,7 +16,16 @@ model:
   apiBase: ""
   requestTimeout: "30"
 
-deploymentStamp: pilot
+deploymentStamp: app-release-module-baseline
+
+# 此试点已接入 Helmsman 应用发布模块，以 Rollout 管理版本变更。
+rollout:
+  enabled: true
+  replicas: 2
+  firstWeight: 20
+  firstPause: 5s
+  secondWeight: 50
+  secondPause: 5s
 
 resources:
   requests:

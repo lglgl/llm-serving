@@ -75,3 +75,19 @@
 - 已证明：网关代码测试、镜像构建与本地安全扫描、mock 推理链路、Kubernetes 沙箱部署和 Helm 回滚。
 - 尚未证明：远程 Jenkins CI、Harbor 鉴权推送/集群拉取、真实 vLLM/权重发布、模型质量评测或生产入口。
 - 后续若要接真实模型发布：先修复 Jenkins Job SCM/脚本分支配置并提供受控 Jenkins API 执行通道；验证 Harbor 凭据和节点拉取，再单独规划 GPU/权重存储、模型版本与质量门禁。不要把当前 mock CD 作为真实模型验收证据。
+
+### 步骤 5：Harbor push/pull 与 Helmsman 应用发布模块接入（2026-10-30）
+
+- 项目负责人要求 llm-serving 测试发布通过 Helmsman“应用发布”模块。该模块此前只接入 `hm-demo`；本次仅将 `llm-serving-pilot` 接入既有 Argo Rollouts 模块，不修改旧 `llm-serving` namespace。
+- 复用本机已有 Docker 登录项，没有输出或复制凭据。先确认目标 tag 不存在，再推 app 与 mock 镜像：tag `afad3bf86756` 的 digest 分别为 app `sha256:3d0a30ae502b597bbafd501fb2433f33b166120f16f33d5fd6c78bc769b678c1`、mock `sha256:ace0cefb1f4a7c979164b15708eb522b04ac56ab05437f0ac29256a039aa3cc2`。
+- 为强制 Kubernetes 从 Harbor 拉取，另推此前不存在的 `afad3bf86756-harbor-20261030` tag，并临时用 `imagePullPolicy: Always` 部署。Kubernetes Events 记录 app 与 mock 均成功拉取，Pod `imageID` 与 Harbor digest 一致；readiness、模型列表和 mock 聊天 smoke 通过。该临时 Helm 验证随后回滚；项目负责人要求经模块发布后，未再用 Helm 切换候选 tag。
+- Helm Chart 增加可选 Rollout、canary Service 和 readiness AnalysisTemplate；默认关闭 Rollout，保持原 CD pilot 行为。Helm lint 与 `kubectl apply --dry-run=server` 通过。用稳定 tag `afad3bf86756` 安装 Rollout 基线（Helm revision 12），Argo Rollouts phase Healthy，基线 smoke 通过。
+- Helmsman 增加跨仓库源码审计配置，模块通过本地 `llm-serving` Git 仓库的提交归档源码。应用发布单 #9 候选 tag `afad3bf86756-harbor-20261030` 的 gitleaks / Semgrep 通过；Trivy Critical=0、High=45（warning）；GLM 语义评审返回 HTTP 429（无可用额度，非阻断）。
+- 通过 Helmsman 模块申请开始金丝雀，生成审批单 #21（风险 L2、需一位审批人）；随后负责人在 UI 批准，模块开始候选发布。
+
+- 负责人随后在 Helmsman UI 批准 #21，发布单 #9 由模块完成 20%→50%→100%，最终 Healthy / 已全量；stable Service smoke 通过。
+- 处理 Helm 漂移：Chart `values.yaml` 默认 tag 更新为 `afad3bf86756-harbor-20261030`，Rollout enabled、imagePullPolicy Always；与当前 release manifest 对比仅差 app image tag。普通 `helm upgrade` 沿用旧用户值，未同步；以 `--reset-values` 重跑后 Helm revision 14 与模块 live tag 一致，Rollout 未重启 Pod，发布后 smoke 通过。
+- `scripts/cd-pilot.sh` 现在检测到现有 `llm-serving-pilot` Rollout 会拒绝直接 Helm CD；非 Rollout 的独立本地试点路径会显式关闭 Rollout，避免误把 Deployment 脚本用于模块管理的发布。
+- Chart 变更尚未提交或纳入 Argo CD GitOps；Helm 本地 release 与当前工作区已一致，持久化/远端统一声明仍待 S04 补齐。
+
+状态：Harbor push/pull、模块审计与批准后的应用模块发布通过。仍未验证 Jenkins Job、SBOM/cosign、Argo CD GitOps、Kyverno、真实 vLLM/GPU/权重和模型质量。

@@ -16,11 +16,17 @@ if [[ "$(kubectl config current-context)" != "docker-desktop" ]]; then
   exit 1
 fi
 
+if kubectl get rollout "$RELEASE" -n "$NAMESPACE" >/dev/null 2>&1; then
+  echo "Refusing direct Helm CD: $NAMESPACE/$RELEASE is managed by the Helmsman application release module" >&2
+  exit 1
+fi
+
 helm lint "$CHART"
 helm upgrade --install "$RELEASE" "$CHART" \
   --namespace "$NAMESPACE" --create-namespace \
   --set-string image.repository="${APP_IMAGE%:*}" \
   --set-string image.tag="${APP_IMAGE##*:}" \
+  --set rollout.enabled=false \
   --set-string mockBackend.image.repository="${MOCK_IMAGE%:*}" \
   --set-string mockBackend.image.tag="${MOCK_IMAGE##*:}" \
   --set-string deploymentStamp="pilot-${APP_TAG}" \
@@ -64,6 +70,7 @@ helm upgrade "$RELEASE" "$CHART" \
   --namespace "$NAMESPACE" \
   --set-string image.repository="${APP_IMAGE%:*}" \
   --set-string image.tag="${APP_IMAGE##*:}" \
+  --set rollout.enabled=false \
   --set-string mockBackend.image.repository="${MOCK_IMAGE%:*}" \
   --set-string mockBackend.image.tag="${MOCK_IMAGE##*:}" \
   --set-string deploymentStamp="rollback-probe-${APP_TAG}" \

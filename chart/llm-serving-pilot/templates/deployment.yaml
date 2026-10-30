@@ -1,3 +1,75 @@
+{{- if .Values.rollout.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "llm-serving-pilot.fullname" . }}
+  labels:
+    {{- include "llm-serving-pilot.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.rollout.replicas }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "llm-serving-pilot.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "llm-serving-pilot.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: api
+      annotations:
+        pilot.llm-serving/revision: {{ .Values.deploymentStamp | quote }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DEFAULT_MODEL
+              value: {{ .Values.model.alias | quote }}
+            - name: VLLM_MODEL
+              value: {{ .Values.model.upstream | quote }}
+            - name: VLLM_API_BASE
+              value: {{ if .Values.mockBackend.enabled }}{{ printf "http://%s-mock:8001/v1" (include "llm-serving-pilot.fullname" .) | quote }}{{ else }}{{ .Values.model.apiBase | quote }}{{ end }}
+            - name: REQUEST_TIMEOUT
+              value: {{ .Values.model.requestTimeout | quote }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+  strategy:
+    canary:
+      stableService: {{ include "llm-serving-pilot.fullname" . }}
+      canaryService: {{ include "llm-serving-pilot.fullname" . }}-canary
+      analysis:
+        templates:
+          - templateName: {{ include "llm-serving-pilot.fullname" . }}-health
+        startingStep: 1
+      steps:
+        - setWeight: {{ .Values.rollout.firstWeight }}
+        - pause:
+            duration: {{ .Values.rollout.firstPause | quote }}
+        - setWeight: {{ .Values.rollout.secondWeight }}
+        - pause:
+            duration: {{ .Values.rollout.secondPause | quote }}
+{{- else }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,6 +125,7 @@ spec:
             timeoutSeconds: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -70,3 +143,22 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+{{- if .Values.rollout.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-serving-pilot.fullname" . }}-canary
+  labels:
+    {{- include "llm-serving-pilot.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "llm-serving-pilot.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}

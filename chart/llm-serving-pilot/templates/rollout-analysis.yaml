@@ -1,0 +1,17 @@
+{{- if .Values.rollout.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "llm-serving-pilot.fullname" . }}-health
+  labels:
+    {{- include "llm-serving-pilot.labels" . | nindent 4 }}
+spec:
+  metrics:
+    - name: canary-readiness
+      count: 1
+      successCondition: result == 'ready'
+      provider:
+        web:
+          url: http://{{ include "llm-serving-pilot.fullname" . }}-canary.{{ .Release.Namespace }}.svc:8000/readyz
+          jsonPath: "{$.status}"
+{{- end }}
