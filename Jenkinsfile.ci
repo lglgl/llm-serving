@@ -49,11 +49,35 @@ pipeline {
                 }
             }
         }
+
+        stage('SBOM and Vault-backed image signatures') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'harbor-credentials',
+                                                  usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                    sh '''
+                        set -euo pipefail
+                        set +x
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+                        echo "$HARBOR_PASSWORD" | docker login harbor.local:30080 -u "$HARBOR_USER" --password-stdin >/dev/null
+                        APP_IMAGE="$(cat app-image-digest.txt)"
+                        MOCK_IMAGE="$(cat mock-image-digest.txt)"
+                        syft "$APP_IMAGE" -o cyclonedx-json=app.sbom.cdx.json
+                        syft "$MOCK_IMAGE" -o cyclonedx-json=mock.sbom.cdx.json
+                        python3 scripts/cosign-vault.py sign "$APP_IMAGE"
+                        python3 scripts/cosign-vault.py verify "$APP_IMAGE"
+                        python3 scripts/cosign-vault.py sign "$MOCK_IMAGE"
+                        python3 scripts/cosign-vault.py verify "$MOCK_IMAGE"
+                    '''
+                }
+            }
+        }
     }
 
     post {
         always {
-            archiveArtifacts artifacts: 'app-image-digest.txt,mock-image-digest.txt', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'app-image-digest.txt,mock-image-digest.txt,app.sbom.cdx.json,mock.sbom.cdx.json', allowEmptyArchive: true
         }
         success {
             echo "CI pilot passed for ${env.GIT_SHA}; CD remains a separate, explicit job."
